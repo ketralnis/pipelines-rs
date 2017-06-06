@@ -1,0 +1,6 @@
+[package]
+name = "rs-ducts"
+version = "0.1.0"
+authors = ["David King <dking@ketralnis.com>"]
+
+[dependencies]
