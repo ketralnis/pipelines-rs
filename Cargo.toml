@@ -1,6 +1,7 @@
 [package]
-name = "rs-ducts"
+name = "rs_ducts"
 version = "0.1.0"
 authors = ["David King <dking@ketralnis.com>"]
 
 [dependencies]
+chan = "0.1.19"
