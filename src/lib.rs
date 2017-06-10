@@ -58,16 +58,22 @@ impl<Output> Pipeline<Output>
         self.then(filter::Filter::new(func), buffsize)
     }
 
-    #[must_use]
-    pub fn into_iter(self) -> mpsc::IntoIter<Output> {
-        self.rx.into_iter()
-    }
-
     pub fn drain(self) {
-        for _ in self.into_iter() {}
+        for _ in self {}
     }
 }
 
+impl<Output> IntoIterator for Pipeline<Output>
+    where Output: Send
+{
+    type Item = Output;
+    type IntoIter = mpsc::IntoIter<Output>;
+
+    #[must_use]
+    fn into_iter(self) -> mpsc::IntoIter<Output> {
+        self.rx.into_iter()
+    }
+}
 
 pub trait PipelineEntry<In, Out> {
     fn process<I: IntoIterator<Item = In>>(self, rx: I, tx: mpsc::SyncSender<Out>) -> ();
@@ -216,7 +222,6 @@ pub mod multiplex {
         }
     }
 
-    #[derive(Clone)]
     struct LockedRx<T>
         where T: Send
     {
@@ -229,9 +234,13 @@ pub mod multiplex {
         pub fn new(recv: mpsc::Receiver<T>) -> Self {
             Self { lockbox: Arc::new(Mutex::new(recv)) }
         }
+    }
 
-        pub fn clone(&self) -> Self {
-            return Self { lockbox: self.lockbox.clone() };
+    impl<T> Clone for LockedRx<T>
+        where T: Send
+    {
+        fn clone(&self) -> Self {
+            Self { lockbox: self.lockbox.clone() }
         }
     }
 
