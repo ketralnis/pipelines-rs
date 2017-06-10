@@ -184,10 +184,8 @@ pub mod multiplex {
                   Out: Send + 'static {
         fn process<I: IntoIterator<Item=In>>(self, rx: I, tx: mpsc::SyncSender<Out>) {
             // workers will read their work out of this channel but send their
-            // results directly into the regular tx channel. We pull in the chan
-            // package for this rather than use mpsc because we need multiple
-            // consumers
-            let (chan_tx, chan_rx) = mpsc::sync_channel(self.buffsize);
+            // results directly into the regular tx channel
+            let (master_tx, chan_rx) = mpsc::sync_channel(self.buffsize);
             let chan_rx = LockedRx::new(chan_rx);
 
             for entry in self.entries {
@@ -203,7 +201,7 @@ pub mod multiplex {
             // will be putting their results into tx directly so this is the
             // only shuffling around that we have to do
             for item in rx {
-                chan_tx.send(item).expect("failed subsend");
+                master_tx.send(item).expect("failed subsend");
             }
         }
     }
