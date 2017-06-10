@@ -32,7 +32,7 @@ impl<Output> Pipeline<Output>
     #[must_use]
     pub fn then<EntryOut, Entry>(self, next: Entry, buffsize: usize)
             -> Pipeline<EntryOut>
-            where Entry: Send + 'static + PipelineEntry<Output, EntryOut>,
+            where Entry: PipelineEntry<Output, EntryOut> + Send + 'static,
                   EntryOut: Send {
         let (tx, rx) = mpsc::sync_channel(buffsize);
         thread::spawn(move || {
@@ -40,6 +40,19 @@ impl<Output> Pipeline<Output>
         });
 
         Pipeline{rx}
+    }
+
+    pub fn map<EntryOut, Func>(self, func: Func, buffsize: usize)
+            -> Pipeline<EntryOut>
+            where Func: Fn(Output) -> EntryOut + Send + 'static,
+                  EntryOut: Send {
+        self.then(map::Mapper::new(func), buffsize)
+    }
+
+    pub fn filter<Func>(self, func: Func, buffsize: usize)
+            -> Pipeline<Output>
+            where Func: Fn(&Output) -> bool + Send + 'static {
+        self.then(filter::Filter::new(func), buffsize)
     }
 
     #[must_use]
@@ -56,9 +69,10 @@ pub trait PipelineEntry<In, Out> {
     fn process<I: IntoIterator<Item=In>>(self, rx: I, tx: mpsc::SyncSender<Out>) -> ();
 }
 
+
 pub mod map {
     use std::marker::PhantomData;
-    use std::sync::mpsc::SyncSender;
+    use std::sync::mpsc;
 
     use super::PipelineEntry;
 
@@ -83,7 +97,7 @@ pub mod map {
 
     impl<In, Out, Func> PipelineEntry<In, Out> for Mapper<In, Out, Func>
             where Func: Fn(In) -> Out {
-        fn process<I: IntoIterator<Item=In>>(self, rx: I, tx: SyncSender<Out>) {
+        fn process<I: IntoIterator<Item=In>>(self, rx: I, tx: mpsc::SyncSender<Out>) {
             for item in rx {
                 let mapped = (self.func)(item);
                 tx.send(mapped).expect("failed to send");
@@ -91,6 +105,42 @@ pub mod map {
         }
     }
 }
+
+pub mod filter {
+    use std::marker::PhantomData;
+    use std::sync::mpsc;
+
+    use super::PipelineEntry;
+
+    #[derive(Debug)]
+    pub struct Filter<In, Func>
+            where Func: Fn(&In) -> bool {
+        func: Func,
+
+        // make the compiler happy
+        in_: PhantomData<In>,
+    }
+
+    impl<In, Func> Filter<In, Func>
+            where Func: Fn(&In) -> bool {
+        pub fn new(func: Func) -> Self {
+            Filter{func,
+                   in_: PhantomData}
+        }
+    }
+
+    impl<In, Func> PipelineEntry<In, In> for Filter<In, Func>
+            where Func: Fn(&In) -> bool {
+        fn process<I: IntoIterator<Item=In>>(self, rx: I, tx: mpsc::SyncSender<In>) {
+            for item in rx {
+                if (self.func)(&item) {
+                    tx.send(item).expect("failed to send")
+                }
+            }
+        }
+    }
+}
+
 
 pub mod multiplex {
     use std::marker::PhantomData;
@@ -160,7 +210,7 @@ mod tests {
     fn simple() {
         let buffsize: usize = 10;
         let source: Vec<i32> = vec![1, 2, 3];
-        let pbb: Pipeline<i32> = Pipeline::new(source.clone(), buffsize);
+        let pbb: Pipeline<i32> = Pipeline::new(source, buffsize);
         let produced: Vec<i32> = pbb.into_iter().collect();
 
         assert_eq!(produced, vec![1, 2, 3]);
@@ -173,8 +223,8 @@ mod tests {
         let source: Vec<i32> = (1..1000).collect();
         let expect: Vec<i32> = source.iter().map(|x| x*2).collect();
 
-        let pbb: Pipeline<i32> = Pipeline::new(source.clone(), buffsize)
-            .then(map::Mapper::new(|i| i*2), buffsize);
+        let pbb: Pipeline<i32> = Pipeline::new(source, buffsize)
+            .map(|i| i*2, buffsize);
         let produced: Vec<i32> = pbb.into_iter().collect();
 
         assert_eq!(produced, expect);
@@ -186,9 +236,9 @@ mod tests {
         let source: Vec<i32> = vec![1, 2, 3];
         let expect: Vec<i32> = source.iter().map(|x| (x*2)*(x*2)).collect();
 
-        let pbb: Pipeline<i32> = Pipeline::new(source.clone(), buffsize)
-            .then(map::Mapper::new(|i| i*2), buffsize)
-            .then(map::Mapper::new(|i| i*i), buffsize);
+        let pbb: Pipeline<i32> = Pipeline::new(source, buffsize)
+            .map(|i| i*2, buffsize)
+            .map(|i| i*i, buffsize);
         let produced: Vec<i32> = pbb.into_iter().collect();
 
         assert_eq!(produced, expect);
@@ -201,7 +251,7 @@ mod tests {
         let source: Vec<i32> = (1..1000).collect();
         let expect: Vec<i32> = source.iter().map(|x| x*2).collect();
 
-        let pbb: Pipeline<i32> = Pipeline::new(source.clone(), buffsize)
+        let pbb: Pipeline<i32> = Pipeline::new(source, buffsize)
             // TOOD multiplex takes a list of PipelineEntry but it would be
             // nicer if it just took one and was able to clone it
             .then(
@@ -212,6 +262,24 @@ mod tests {
         let mut produced: Vec<i32> = pbb.into_iter().collect();
 
         produced.sort(); // these may arrive out of order
+        assert_eq!(produced, expect);
+    }
+
+    #[test]
+    fn filter() {
+        let buffsize: usize = 10;
+
+        let source: Vec<i32> = (1..1000).collect();
+        let expect: Vec<i32> = source.iter()
+            .map(|x| x+1)
+            .filter(|x| x%2==0)
+            .collect();
+
+        let pbb: Pipeline<i32> = Pipeline::new(source, buffsize)
+            .map(|i| i+1, buffsize)
+            .filter(|i| i%2==0, buffsize);
+        let produced: Vec<i32> = pbb.into_iter().collect();
+
         assert_eq!(produced, expect);
     }
 }
