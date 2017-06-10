@@ -21,7 +21,9 @@ fn bench_single() {
 fn bench_multi() {
     let source: Vec<u64> = (1..WORK_COUNT).collect();
 
-    let mappers = (0..4).map(|_| map::Mapper::new(|x| fib(WORK_FACTOR) + x)).collect();
+    let mappers = (0..4)
+        .map(|_| map::Mapper::new(|x| fib(WORK_FACTOR) + x))
+        .collect();
     Pipeline::new(source, BUFFSIZE)
         .then(multiplex::Multiplex::new(mappers, BUFFSIZE), BUFFSIZE)
         .drain();
