@@ -34,9 +34,18 @@ impl<Output> Pipeline<Output>
             -> Pipeline<EntryOut>
             where Entry: PipelineEntry<Output, EntryOut> + Send + 'static,
                   EntryOut: Send {
+        self.pipe(move |tx, rx| next.process(tx, rx), buffsize)
+    }
+
+    pub fn pipe<EntryOut, Func>(self, func: Func, buffsize: usize)
+            -> Pipeline<EntryOut>
+            where Func: FnOnce(mpsc::Receiver<Output>,
+                               mpsc::SyncSender<EntryOut>) -> (),
+                  Func: Send + 'static,
+                EntryOut: Send {
         let (tx, rx) = mpsc::sync_channel(buffsize);
         thread::spawn(move || {
-            next.process(self.rx, tx);
+            func(self.rx, tx);
         });
 
         Pipeline{rx}
@@ -278,6 +287,30 @@ mod tests {
         let pbb: Pipeline<i32> = Pipeline::new(source, buffsize)
             .map(|i| i+1, buffsize)
             .filter(|i| i%2==0, buffsize);
+        let produced: Vec<i32> = pbb.into_iter().collect();
+
+        assert_eq!(produced, expect);
+    }
+
+    #[test]
+    fn simple_closure() {
+        let buffsize: usize = 10;
+
+        let source: Vec<i32> = (1..1000).collect();
+        let expect: Vec<i32> = source.iter()
+            .map(|x| x+1)
+            .filter(|x| x%2==0)
+            .collect();
+
+        let pbb: Pipeline<i32> = Pipeline::new(source, buffsize)
+            .pipe(|in_, out| {
+                    for item in in_ {
+                        let item = item+1;
+                        if item % 2 == 0 {
+                            out.send(item).expect("failed to send")
+                        }
+                    }
+            }, 10);
         let produced: Vec<i32> = pbb.into_iter().collect();
 
         assert_eq!(produced, expect);
