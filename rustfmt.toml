@@ -1,0 +1,3 @@
+fn_brace_style = "SameLineWhere"
+item_brace_style = "SameLineWhere"
+use_try_shorthand = true

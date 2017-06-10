@@ -3,19 +3,16 @@ use std::thread;
 
 #[derive(Debug)]
 pub struct Pipeline<Output>
-    where Output: Send + 'static
-{
+    where Output: Send + 'static {
     rx: mpsc::Receiver<Output>,
 }
 
 impl<Output> Pipeline<Output>
-    where Output: Send
-{
+    where Output: Send {
     // start up the producer thread and start sending items into rx
     #[must_use]
     pub fn new<I>(source: I, buffsize: usize) -> Pipeline<Output>
-        where I: Send + 'static + IntoIterator<Item = Output>
-    {
+        where I: Send + 'static + IntoIterator<Item = Output> {
         let (tx, rx) = mpsc::sync_channel(buffsize);
         thread::spawn(move || for item in source {
                           tx.send(item).expect("failed send (super)");
@@ -29,16 +26,14 @@ impl<Output> Pipeline<Output>
     #[must_use]
     pub fn then<EntryOut, Entry>(self, next: Entry, buffsize: usize) -> Pipeline<EntryOut>
         where Entry: PipelineEntry<Output, EntryOut> + Send + 'static,
-              EntryOut: Send
-    {
+              EntryOut: Send {
         self.pipe(move |tx, rx| next.process(tx, rx), buffsize)
     }
 
     pub fn pipe<EntryOut, Func>(self, func: Func, buffsize: usize) -> Pipeline<EntryOut>
         where Func: FnOnce(mpsc::Receiver<Output>, mpsc::SyncSender<EntryOut>) -> (),
               Func: Send + 'static,
-              EntryOut: Send
-    {
+              EntryOut: Send {
         let (tx, rx) = mpsc::sync_channel(buffsize);
         thread::spawn(move || { func(self.rx, tx); });
 
@@ -47,14 +42,12 @@ impl<Output> Pipeline<Output>
 
     pub fn map<EntryOut, Func>(self, func: Func, buffsize: usize) -> Pipeline<EntryOut>
         where Func: Fn(Output) -> EntryOut + Send + 'static,
-              EntryOut: Send
-    {
+              EntryOut: Send {
         self.then(map::Mapper::new(func), buffsize)
     }
 
     pub fn filter<Func>(self, func: Func, buffsize: usize) -> Pipeline<Output>
-        where Func: Fn(&Output) -> bool + Send + 'static
-    {
+        where Func: Fn(&Output) -> bool + Send + 'static {
         self.then(filter::Filter::new(func), buffsize)
     }
 
@@ -82,8 +75,7 @@ pub mod map {
 
     #[derive(Debug)]
     pub struct Mapper<In, Out, Func>
-        where Func: Fn(In) -> Out
-    {
+        where Func: Fn(In) -> Out {
         func: Func,
 
         // make the compiler happy
@@ -92,8 +84,7 @@ pub mod map {
     }
 
     impl<In, Out, Func> Mapper<In, Out, Func>
-        where Func: Fn(In) -> Out
-    {
+        where Func: Fn(In) -> Out {
         pub fn new(func: Func) -> Self {
             Mapper {
                 func,
@@ -104,8 +95,7 @@ pub mod map {
     }
 
     impl<In, Out, Func> PipelineEntry<In, Out> for Mapper<In, Out, Func>
-        where Func: Fn(In) -> Out
-    {
+        where Func: Fn(In) -> Out {
         fn process<I: IntoIterator<Item = In>>(self, rx: I, tx: mpsc::SyncSender<Out>) {
             for item in rx {
                 let mapped = (self.func)(item);
@@ -123,8 +113,7 @@ pub mod filter {
 
     #[derive(Debug)]
     pub struct Filter<In, Func>
-        where Func: Fn(&In) -> bool
-    {
+        where Func: Fn(&In) -> bool {
         func: Func,
 
         // make the compiler happy
@@ -132,8 +121,7 @@ pub mod filter {
     }
 
     impl<In, Func> Filter<In, Func>
-        where Func: Fn(&In) -> bool
-    {
+        where Func: Fn(&In) -> bool {
         pub fn new(func: Func) -> Self {
             Filter {
                 func,
@@ -143,8 +131,7 @@ pub mod filter {
     }
 
     impl<In, Func> PipelineEntry<In, In> for Filter<In, Func>
-        where Func: Fn(&In) -> bool
-    {
+        where Func: Fn(&In) -> bool {
         fn process<I: IntoIterator<Item = In>>(self, rx: I, tx: mpsc::SyncSender<In>) {
             for item in rx {
                 if (self.func)(&item) {
@@ -166,8 +153,7 @@ pub mod multiplex {
 
     #[derive(Debug)]
     pub struct Multiplex<In, Out, Entry>
-        where Entry: PipelineEntry<In, Out>
-    {
+        where Entry: PipelineEntry<In, Out> {
         entries: Vec<Entry>,
         buffsize: usize,
 
@@ -177,8 +163,7 @@ pub mod multiplex {
     }
 
     impl<In, Out, Entry> Multiplex<In, Out, Entry>
-        where Entry: PipelineEntry<In, Out> + Send
-    {
+        where Entry: PipelineEntry<In, Out> + Send {
         pub fn new(entries: Vec<Entry>, buffsize: usize) -> Self {
             Multiplex {
                 entries,
@@ -192,8 +177,7 @@ pub mod multiplex {
     impl<In, Out, Entry> PipelineEntry<In, Out> for Multiplex<In, Out, Entry>
         where Entry: PipelineEntry<In, Out> + Send + 'static,
               In: Send + 'static,
-              Out: Send + 'static
-    {
+              Out: Send + 'static {
         fn process<I: IntoIterator<Item = In>>(self, rx: I, tx: mpsc::SyncSender<Out>) {
             // workers will read their work out of this channel but send their
             // results directly into the regular tx channel
@@ -218,14 +202,12 @@ pub mod multiplex {
 
     #[derive(Clone)]
     struct LockedRx<T>
-        where T: Send
-    {
+        where T: Send {
         lockbox: Arc<Mutex<mpsc::Receiver<T>>>,
     }
 
     impl<T> LockedRx<T>
-        where T: Send
-    {
+        where T: Send {
         pub fn new(recv: mpsc::Receiver<T>) -> Self {
             Self { lockbox: Arc::new(Mutex::new(recv)) }
         }
@@ -236,8 +218,7 @@ pub mod multiplex {
     }
 
     impl<T> Iterator for LockedRx<T>
-        where T: Send
-    {
+        where T: Send {
         type Item = T;
 
         fn next(&mut self) -> Option<T> {
