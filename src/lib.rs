@@ -1,5 +1,3 @@
-extern crate chan;
-
 use std::sync::mpsc;
 use std::thread;
 
@@ -154,9 +152,8 @@ pub mod filter {
 pub mod multiplex {
     use std::marker::PhantomData;
     use std::sync::mpsc;
+    use std::sync::{Arc, Mutex};
     use std::thread;
-
-    use chan;
 
     use super::PipelineEntry;
 
@@ -190,11 +187,13 @@ pub mod multiplex {
             // results directly into the regular tx channel. We pull in the chan
             // package for this rather than use mpsc because we need multiple
             // consumers
-            let (chan_tx, chan_rx) = chan::sync(self.buffsize);
+            let (chan_tx, chan_rx) = mpsc::sync_channel(self.buffsize);
+            let chan_rx = LockedRx::new(chan_rx);
 
             for entry in self.entries {
                 let entry_rx = chan_rx.clone();
                 let entry_tx = tx.clone();
+
                 thread::spawn(move || {
                     entry.process(entry_rx, entry_tx);
                 });
@@ -204,7 +203,38 @@ pub mod multiplex {
             // will be putting their results into tx directly so this is the
             // only shuffling around that we have to do
             for item in rx {
-                chan_tx.send(item);
+                chan_tx.send(item).expect("failed subsend");
+            }
+        }
+    }
+
+    #[derive(Clone)]
+    struct LockedRx<T> where T: Send {
+        lockbox: Arc<Mutex<mpsc::Receiver<T>>>
+    }
+
+    impl<T> LockedRx<T> where T: Send {
+        pub fn new(recv: mpsc::Receiver<T>) -> Self {
+            Self {lockbox: Arc::new(Mutex::new(recv))}
+        }
+
+        pub fn clone(&self) -> Self {
+            return Self{lockbox: self.lockbox.clone()}
+        }
+    }
+
+    impl<T> Iterator for LockedRx<T> where T: Send {
+        type Item = T;
+
+        fn next(&mut self) -> Option<T> {
+            match self.lockbox
+                    .lock().expect("failed unwrap mutex")
+                    .recv() {
+                Ok(val) => Some(val),
+                Err(_recv_err) => {
+                    // can only fail on hangup
+                    None
+                }
             }
         }
     }
