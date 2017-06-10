@@ -1,12 +1,14 @@
 use std::sync::mpsc;
 use std::thread;
 
+
 #[derive(Debug)]
 pub struct Pipeline<Output>
     where Output: Send + 'static
 {
     rx: mpsc::Receiver<Output>,
 }
+
 
 impl<Output> Pipeline<Output>
     where Output: Send
@@ -73,6 +75,7 @@ impl<Output> Pipeline<Output>
     }
 }
 
+
 impl<Output> IntoIterator for Pipeline<Output>
     where Output: Send
 {
@@ -84,6 +87,7 @@ impl<Output> IntoIterator for Pipeline<Output>
         self.rx.into_iter()
     }
 }
+
 
 pub trait PipelineEntry<In, Out> {
     fn process<I: IntoIterator<Item = In>>(self,
@@ -134,7 +138,21 @@ pub mod map {
             }
         }
     }
+
+    impl<In, Out, Func> Clone for Mapper<In, Out, Func>
+        where Func: Fn(In) -> Out + Copy
+    {
+        fn clone(&self) -> Self {
+            Mapper::new(self.func)
+        }
+    }
+
+    impl<In, Out, Func> Copy for Mapper<In, Out, Func>
+        where Func: Fn(In) -> Out + Copy
+    {
+    }
 }
+
 
 pub mod filter {
     use std::marker::PhantomData;
@@ -180,6 +198,10 @@ pub mod filter {
 
 
 pub mod multiplex {
+    // work around https://github.com/rust-lang/rust/issues/28229
+    // (functions implement Copy but not Clone)
+    #![cfg_attr(feature="cargo-clippy", allow(expl_impl_clone_on_copy))]
+
     use std::marker::PhantomData;
     use std::sync::mpsc;
     use std::sync::{Arc, Mutex};
@@ -189,7 +211,7 @@ pub mod multiplex {
 
     #[derive(Debug)]
     pub struct Multiplex<In, Out, Entry>
-        where Entry: PipelineEntry<In, Out>
+        where Entry: PipelineEntry<In, Out> + Send
     {
         entries: Vec<Entry>,
         buffsize: usize,
@@ -197,6 +219,14 @@ pub mod multiplex {
         // make the compiler happy
         in_: PhantomData<In>,
         out_: PhantomData<Out>,
+    }
+
+    impl<In, Out, Entry> Multiplex<In, Out, Entry>
+        where Entry: PipelineEntry<In, Out> + Send + Copy
+    {
+        pub fn from(entry: Entry, workers: usize, buffsize: usize) -> Self {
+            Self::new((0..workers).map(|_| entry).collect(), buffsize)
+        }
     }
 
     impl<In, Out, Entry> Multiplex<In, Out, Entry>
@@ -324,21 +354,59 @@ mod tests {
         assert_eq!(produced, expect);
     }
 
+    // just something expensive
+    fn fib_work(n: u64) -> u64 {
+        const WORK_FACTOR: u64 = 10;
+        fib(WORK_FACTOR) + n
+    }
+
+    fn fib(n: u64) -> u64 {
+        if n == 0 || n == 1 {
+            1
+        } else {
+            fib(n - 1) + fib(n - 2)
+        }
+    }
+
     #[test]
-    fn multiplex_map() {
+    fn multiplex_map_function() {
+        // we have two signatures for Multiplex, one that takes a function
+        // pointer and one that can take a closure. THis is the function pointer
+        // side
+
         let buffsize: usize = 10;
+        let workers: usize = 10;
+
+        let source: Vec<u64> = (1..1000).collect();
+        let expect: Vec<u64> =
+            source.clone().into_iter().map(fib_work).collect();
+
+        let pbb: Pipeline<u64> = Pipeline::new(source, buffsize)
+            .then(multiplex::Multiplex::from(map::Mapper::new(fib_work),
+                                             workers,
+                                             buffsize),
+                  buffsize);
+        let mut produced: Vec<u64> = pbb.into_iter().collect();
+
+        produced.sort(); // these may arrive out of order
+        assert_eq!(produced, expect);
+    }
+
+    #[test]
+    fn multiplex_map_closure() {
+        let buffsize: usize = 10;
+        let workers: usize = 10;
 
         let source: Vec<i32> = (1..1000).collect();
         let expect: Vec<i32> = source.iter().map(|x| x * 2).collect();
 
         let pbb: Pipeline<i32> = Pipeline::new(source, buffsize)
-            // TOOD multiplex takes a list of PipelineEntry but it would be
-            // nicer if it just took one and was able to clone it
-            .then(
-                multiplex::Multiplex::new(
-                    (0..10).map(|_| map::Mapper::new(|i| i*2)).collect(),
-                    buffsize),
-                buffsize);
+            .then(multiplex::Multiplex::new((0..workers)
+                .map(|_| {
+                        map::Mapper::new(|i| i * 2)
+                    }).collect(),
+                buffsize),
+            buffsize);
         let mut produced: Vec<i32> = pbb.into_iter().collect();
 
         produced.sort(); // these may arrive out of order
