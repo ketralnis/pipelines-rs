@@ -16,7 +16,7 @@ impl<Output> Pipeline<Output>
     // start up the producer thread and start sending items into rx
     #[must_use]
     pub fn new<I>(source: I, buffsize: usize) -> Pipeline<Output>
-        where I: Send + 'static + IntoIterator<Item = Output>
+        where I: IntoIterator<Item = Output> + Send + 'static
     {
         let (tx, rx) = mpsc::sync_channel(buffsize);
         thread::spawn(move || for item in source {
