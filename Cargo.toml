@@ -6,6 +6,7 @@ authors = ["David King <dking@ketralnis.com>"]
 [dependencies]
 
 [dev-dependencies]
+# for examples/compressior-tester.rs:
 env_logger = "0.4.3"
 flate2 = "0.2.19"
 humansize = "1.0.1"

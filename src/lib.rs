@@ -1,3 +1,47 @@
+#![warn(missing_docs)]
+
+//! A tool for constructing multi-threaded pipelines of execution
+//!
+//! A `Pipeline` consists in one or more `PipelineEntries` that each runs in its
+//! own thread (or multiple threads in the case of `Multiplex`). They take in
+//! items from the previous entry and produce items for the next entry, similar
+//! to a Unix pipeline. This allows for expressing computation as a series of
+//! steps that feed into each other and run concurrently
+//!
+//! # Examples
+//!
+//! Build the first 10 fibonacci numbers:
+//!
+//! ```rust
+//! use pipelines::Pipeline;
+//!
+//! let buffsize = 5;
+//! fn fibonacci(n:u64)->u64{if n<2 {1} else {fibonacci(n-1) + fibonacci(n-2)}}
+//!
+//! let nums: Vec<u64> = (0..10).collect();
+//! let fibs: Vec<u64> = Pipeline::new(nums, buffsize)
+//!     .map(fibonacci, 10)
+//!     .into_iter().collect();
+//! ```
+//!
+//! Build the first 10 fibonacci numbers in parallel:
+//!
+//! ```rust
+//! use pipelines::Pipeline;
+//! use pipelines::multiplex::Multiplex;
+//! use pipelines::map::Mapper;
+//!
+//! let buffsize = 5;
+//! let workers = 2;
+//! fn fibonacci(n:u64)->u64{if n<2 {1} else {fibonacci(n-1) + fibonacci(n-2)}}
+//!
+//! let nums: Vec<u64> = (0..10).collect();
+//! let fibs: Vec<u64> = Pipeline::new(nums, buffsize)
+//!     .then(Multiplex::from(Mapper::new(fibonacci), workers, buffsize), buffsize)
+//!     .into_iter().collect();
+//! ```
+
+
 use std::sync::mpsc;
 use std::thread;
 
@@ -13,7 +57,7 @@ pub struct Pipeline<Output>
 impl<Output> Pipeline<Output>
     where Output: Send
 {
-    // start up the producer thread and start sending items into rx
+    /// Start a pipeline and start feeding it from `source`
     #[must_use]
     pub fn new<I>(source: I, buffsize: usize) -> Pipeline<Output>
         where I: IntoIterator<Item = Output> + Send + 'static
@@ -26,8 +70,8 @@ impl<Output> Pipeline<Output>
         Pipeline { rx }
     }
 
-    // given another pipeline entry, send the results of the previous entry into
-    // the next one
+    /// Given another `PipelineEntry` `next`, send the results of the previous
+    /// entry into it
     #[must_use]
     pub fn then<EntryOut, Entry>(self,
                                  next: Entry,
@@ -39,6 +83,29 @@ impl<Output> Pipeline<Output>
         self.pipe(move |tx, rx| next.process(tx, rx), buffsize)
     }
 
+    /// Express a `PipelineEntry` as a closure
+    ///
+    /// # Example
+    ///
+    /// Take some directories and collect their contents
+    ///
+    /// ```rust
+    /// use pipelines::Pipeline;
+    /// use std::fs;
+    /// use std::path::PathBuf;
+    /// let buffsize = 5;
+    /// let directories = vec!["/usr/bin", "/usr/local/bin"];
+    ///
+    /// let found_files: Vec<PathBuf> = Pipeline::new(directories, buffsize)
+    ///     .pipe(|dirs, out| {
+    ///         for dir in dirs {
+    ///             for path in fs::read_dir(dir).unwrap() {
+    ///                 out.send(path.unwrap().path()).unwrap()
+    ///             }
+    ///         }
+    ///     }, buffsize)
+    ///     .into_iter().collect();
+    /// ```
     pub fn pipe<EntryOut, Func>(self,
                                 func: Func,
                                 buffsize: usize)
@@ -54,6 +121,21 @@ impl<Output> Pipeline<Output>
         Pipeline { rx }
     }
 
+    /// Call `func` on every entry in the pipeline
+    ///
+    /// # Example
+    ///
+    /// Double every number
+    ///
+    /// ```rust
+    /// use pipelines::Pipeline;
+    /// let nums: Vec<u64> = (0..10).collect();
+    /// let buffsize = 5;
+    ///
+    /// let doubled: Vec<u64> = Pipeline::new(nums, buffsize)
+    ///     .map(|x| x*2, buffsize)
+    ///     .into_iter().collect();
+    /// ```
     pub fn map<EntryOut, Func>(self,
                                func: Func,
                                buffsize: usize)
@@ -64,12 +146,41 @@ impl<Output> Pipeline<Output>
         self.then(map::Mapper::new(func), buffsize)
     }
 
-    pub fn filter<Func>(self, func: Func, buffsize: usize) -> Pipeline<Output>
+    /// Pass items into the next `PipelineEntry` only if `pred` is true
+    ///
+    /// # Example
+    ///
+    /// Pass on only even numbers
+    ///
+    /// ```rust
+    /// use pipelines::Pipeline;
+    /// let nums: Vec<u64> = (0..10).collect();
+    /// let buffsize = 5;
+    ///
+    /// let evens: Vec<u64> = Pipeline::new(nums, buffsize)
+    ///     .filter(|x| x%2 == 0, buffsize)
+    ///     .into_iter().collect();
+    /// ```
+    pub fn filter<Func>(self, pred: Func, buffsize: usize) -> Pipeline<Output>
         where Func: Fn(&Output) -> bool + Send + 'static
     {
-        self.then(filter::Filter::new(func), buffsize)
+        self.then(filter::Filter::new(pred), buffsize)
     }
 
+    /// Consume this Pipeline without collecting the results
+    ///
+    /// Can be useful if the work was done in a the last `PipelineEntry`
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use pipeline::Pipeline;
+    /// use sys::fs;
+    ///
+    /// Pipeline::new(vec!["/tmp/file1", "/tmp/file2"], 1)
+    ///     .map(|fname| fs::remove_file(fname).unwrap())
+    ///     .drain(); // no results to pass on
+    /// ```
     pub fn drain(self) {
         for _ in self {}
     }
