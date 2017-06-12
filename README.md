@@ -22,7 +22,8 @@ let fibs: Vec<u64> = Pipeline::new(nums, buffsize)
     .into_iter().collect();
 ```
 
-Build the first 10 fibonacci numbers in parallel:
+Build the first 10 fibonacci numbers in parallel, then double them:
+
 
 ```rust
 use pipelines::Pipeline;
@@ -36,5 +37,6 @@ fn fibonacci(n:u64)->u64{if n<2 {1} else {fibonacci(n-1) + fibonacci(n-2)}}
 let nums: Vec<u64> = (0..10).collect();
 let fibs: Vec<u64> = Pipeline::new(nums, buffsize)
     .then(Multiplex::from(Mapper::new(fibonacci), workers, buffsize), buffsize)
+    .map(|x| x*2, buffsize)
     .into_iter().collect();
 ```
