@@ -2,7 +2,7 @@
 
 //! A tool for constructing multi-threaded pipelines of execution
 //!
-//! A `Pipeline` consists in one or more `PipelineEntries` that each runs in its
+//! A `Pipeline` consists in one or more `PipelineEntry`s that each runs in its
 //! own thread (or multiple threads in the case of `Multiplex`). They take in
 //! items from the previous entry and produce items for the next entry, similar
 //! to a Unix pipeline. This allows for expressing computation as a series of
