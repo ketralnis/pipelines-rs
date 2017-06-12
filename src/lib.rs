@@ -41,6 +41,7 @@
 //!     .into_iter().collect();
 //! ```
 
+// HEADUPS: Keep that ^^ in sync with README.md
 
 use std::sync::mpsc;
 use std::thread;
