@@ -1,6 +1,6 @@
 [package]
 name = "pipelines"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["David King <dking@ketralnis.com>"]
 license = "BSD-2-Clause"
 license_file = "LICENSE"
@@ -9,7 +9,11 @@ repository = "https://github.com/ketralnis/pipelines-rs"
 readme = "README.md"
 keywords = ["pipeline", "pipelines", "parallel", "concurrent"]
 
+[features]
+default = ["chan"]
+
 [dependencies]
+chan = {version="0.1.19", optional=true}
 
 [dev-dependencies]
 # for examples/compressior-tester.rs:

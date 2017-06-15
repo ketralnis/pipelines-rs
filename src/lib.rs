@@ -27,9 +27,7 @@
 //! Build the first 10 fibonacci numbers in parallel, then double them:
 //!
 //! ```rust
-//! use pipelines::Pipeline;
-//! use pipelines::multiplex::Multiplex;
-//! use pipelines::map::Mapper;
+//! use pipelines::{Pipeline, Mapper, Multiplex};
 //!
 //! let buffsize = 5;
 //! let workers = 2;
@@ -46,6 +44,10 @@
 
 use std::sync::mpsc;
 use std::thread;
+
+pub use map::Mapper;
+pub use filter::Filter;
+pub use multiplex::Multiplex;
 
 
 #[derive(Debug)]
@@ -74,6 +76,22 @@ impl<Output> Pipeline<Output>
 
     /// Given another `PipelineEntry` `next`, send the results of the previous
     /// entry into it
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use pipelines::{Pipeline, Multiplex, Mapper};
+    ///
+    /// let buffsize = 5;
+    /// let workers = 2;
+    /// fn fibonacci(n:u64)->u64{if n<2 {1} else {fibonacci(n-1) + fibonacci(n-2)}}
+    ///
+    /// let nums: Vec<u64> = (0..10).collect();
+    /// let fibs: Vec<u64> = Pipeline::new(nums, buffsize)
+    ///     .then(Multiplex::from(Mapper::new(fibonacci), workers, buffsize), buffsize)
+    ///     .map(|x| x*2, buffsize)
+    ///     .into_iter().collect();
+    /// ```
     #[must_use]
     pub fn then<EntryOut, Entry>(self,
                                  next: Entry,
@@ -202,6 +220,7 @@ impl<Output> IntoIterator for Pipeline<Output>
 }
 
 
+/// The trait that entries in the pipeline must implement
 pub trait PipelineEntry<In, Out> {
     fn process<I: IntoIterator<Item = In>>(self,
                                            rx: I,
@@ -210,12 +229,14 @@ pub trait PipelineEntry<In, Out> {
 }
 
 
-pub mod map {
+mod map {
     use std::marker::PhantomData;
     use std::sync::mpsc;
 
     use super::PipelineEntry;
 
+    /// A pipeline entry representing a function to be run on each value and its
+    /// result to be send down the pipeline
     #[derive(Debug)]
     pub struct Mapper<In, Out, Func>
         where Func: Fn(In) -> Out
@@ -227,6 +248,7 @@ pub mod map {
         out_: PhantomData<Out>,
     }
 
+    /// Make a new `Mapper` out of a function
     impl<In, Out, Func> Mapper<In, Out, Func>
         where Func: Fn(In) -> Out
     {
@@ -267,12 +289,14 @@ pub mod map {
 }
 
 
-pub mod filter {
+mod filter {
     use std::marker::PhantomData;
     use std::sync::mpsc;
 
     use super::PipelineEntry;
 
+    /// A pipeline entry with a predicate that values must beet to be sent
+    /// further in the pipeline
     #[derive(Debug)]
     pub struct Filter<In, Func>
         where Func: Fn(&In) -> bool
@@ -283,6 +307,7 @@ pub mod filter {
         in_: PhantomData<In>,
     }
 
+    /// Make a new `Filter` out of a predicate function
     impl<In, Func> Filter<In, Func>
         where Func: Fn(&In) -> bool
     {
@@ -310,7 +335,7 @@ pub mod filter {
 }
 
 
-pub mod multiplex {
+mod multiplex {
     // work around https://github.com/rust-lang/rust/issues/28229
     // (functions implement Copy but not Clone)
     #![cfg_attr(feature="cargo-clippy", allow(expl_impl_clone_on_copy))]
@@ -322,6 +347,8 @@ pub mod multiplex {
 
     use super::PipelineEntry;
 
+    /// A meta pipeline entry that distributes the work of a `PipelineEntry`
+    /// across multiple threads
     #[derive(Debug)]
     pub struct Multiplex<In, Out, Entry>
         where Entry: PipelineEntry<In, Out> + Send
@@ -334,6 +361,11 @@ pub mod multiplex {
         out_: PhantomData<Out>,
     }
 
+    /// Build a `Multiplex` by copying an existing `PipelineEntry`
+    ///
+    /// Note: this is only applicable where the `PipelineEntry` implements Copy,
+    /// which due to [Rust #28229](https://github.com/rust-lang/rust/issues/28229)
+    /// is not true of closure functions
     impl<In, Out, Entry> Multiplex<In, Out, Entry>
         where Entry: PipelineEntry<In, Out> + Send + Copy
     {
@@ -355,6 +387,9 @@ pub mod multiplex {
         }
     }
 
+    #[cfg(feature="chan")]
+    extern crate chan;
+
     impl<In, Out, Entry> PipelineEntry<In, Out> for Multiplex<In, Out, Entry>
         where Entry: PipelineEntry<In, Out> + Send + 'static,
               In: Send + 'static,
@@ -363,23 +398,44 @@ pub mod multiplex {
         fn process<I: IntoIterator<Item = In>>(self,
                                                rx: I,
                                                tx: mpsc::SyncSender<Out>) {
-            // workers will read their work out of this channel but send their
-            // results directly into the regular tx channel
-            let (master_tx, chan_rx) = mpsc::sync_channel(self.buffsize);
-            let chan_rx = LockedRx::new(chan_rx);
 
-            for entry in self.entries {
-                let entry_rx = chan_rx.clone();
-                let entry_tx = tx.clone();
+            if cfg!(feature="chan") {
+                // if we're compiled when `chan` support, use that
+                let (chan_tx, chan_rx) = chan::sync(self.buffsize);
 
-                thread::spawn(move || { entry.process(entry_rx, entry_tx); });
-            }
+                for entry in self.entries {
+                    let entry_rx = chan_rx.clone();
+                    let entry_tx = tx.clone();
 
-            // now we copy the work from rx into the shared channel. the workers
-            // will be putting their results into tx directly so this is the
-            // only shuffling around that we have to do
-            for item in rx {
-                master_tx.send(item).expect("failed subsend");
+                    thread::spawn(move || {
+                        entry.process(entry_rx, entry_tx);
+                    });
+                }
+
+                for item in rx {
+                    chan_tx.send(item);
+                }
+
+            } else {
+                // if we weren't, use a Mutex<rx>. workers will read their work
+                // out of this channel but send their results directly into the
+                // regular tx channel
+                let (master_tx, chan_rx) = mpsc::sync_channel(self.buffsize);
+                let chan_rx = LockedRx::new(chan_rx);
+
+                for entry in self.entries {
+                    let entry_rx = chan_rx.clone();
+                    let entry_tx = tx.clone();
+
+                    thread::spawn(move || { entry.process(entry_rx, entry_tx); });
+                }
+
+                // now we copy the work from rx into the shared channel. the workers
+                // will be putting their results into tx directly so this is the
+                // only shuffling around that we have to do
+                for item in rx {
+                    master_tx.send(item).expect("failed subsend");
+                }
             }
         }
     }

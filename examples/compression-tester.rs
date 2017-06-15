@@ -20,8 +20,7 @@ use flate2::Compression;
 use flate2::read::ZlibEncoder;
 use humansize::{FileSize, file_size_opts};
 
-use pipelines::map;
-use pipelines::multiplex;
+use pipelines::{Pipeline, Mapper, Multiplex};
 
 fn main() {
     // we could have this many whole files' contents in memory at once
@@ -32,7 +31,7 @@ fn main() {
 
     let args: Vec<OsString> = env::args_os().skip(1).collect();
 
-    let pl = pipelines::Pipeline::new(args, 0)
+    let pl = Pipeline::new(args, 0)
         .pipe(|args, out| {
             // walk all of the directories we were passed
             for arg in args {
@@ -63,9 +62,9 @@ fn main() {
             data
         }, BUFFSIZE)
         // but we can do the compression in parallel
-        .then(multiplex::Multiplex::from(map::Mapper::new(try_compress),
-                                         workers,
-                                         BUFFSIZE),
+        .then(Multiplex::from(Mapper::new(try_compress),
+                              workers,
+                              BUFFSIZE),
               BUFFSIZE);
 
     let mut total_old_size: usize = 0;
