@@ -1,7 +1,7 @@
 /// A `pipelines` example to see how much space could be saved in a directory
 /// with compression
-
-#[macro_use] extern crate log;
+#[macro_use]
+extern crate log;
 extern crate env_logger;
 extern crate flate2;
 extern crate humansize;
@@ -25,7 +25,7 @@ use pipelines::{Pipeline, Mapper, Multiplex};
 fn main() {
     // we could have this many whole files' contents in memory at once
     const BUFFSIZE: usize = 10;
-    
+
     // how many threads to use for compression
     let workers = num_cpus::get();
 
@@ -75,20 +75,22 @@ fn main() {
     for (old_size, new_size) in pl {
         total_old_size += old_size;
         total_new_size += new_size;
-        size_diff += old_size as isize-new_size as isize;
+        size_diff += old_size as isize - new_size as isize;
         total_files += 1;
     }
 
-    println!("You could save {} with compression ({} -> {} in {} files)",
-             friendly(size_diff),
-             friendly(total_old_size as isize),
-             friendly(total_new_size as isize),
-             total_files,
-             )
+    println!(
+        "You could save {} with compression ({} -> {} in {} files)",
+        friendly(size_diff),
+        friendly(total_old_size as isize),
+        friendly(total_new_size as isize),
+        total_files,
+    )
 }
 
 fn friendly(size: isize) -> String {
-    size.file_size(file_size_opts::CONVENTIONAL).expect("bad file size")
+    size.file_size(file_size_opts::CONVENTIONAL)
+        .expect("bad file size")
 }
 
 fn try_compress(data: Vec<u8>) -> (usize, usize) {

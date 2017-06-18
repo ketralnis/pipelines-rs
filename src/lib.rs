@@ -52,24 +52,27 @@ pub use multiplex::Multiplex;
 
 #[derive(Debug)]
 pub struct Pipeline<Output>
-    where Output: Send + 'static
+where
+    Output: Send + 'static,
 {
     rx: mpsc::Receiver<Output>,
 }
 
 
 impl<Output> Pipeline<Output>
-    where Output: Send
+where
+    Output: Send,
 {
     /// Start a pipeline and start feeding it from `source`
     #[must_use]
     pub fn new<I>(source: I, buffsize: usize) -> Pipeline<Output>
-        where I: IntoIterator<Item = Output> + Send + 'static
+    where
+        I: IntoIterator<Item = Output> + Send + 'static,
     {
         let (tx, rx) = mpsc::sync_channel(buffsize);
         thread::spawn(move || for item in source {
-                          tx.send(item).expect("failed send (super)");
-                      });
+            tx.send(item).expect("failed send (super)");
+        });
 
         Pipeline { rx }
     }
@@ -93,12 +96,14 @@ impl<Output> Pipeline<Output>
     ///     .into_iter().collect();
     /// ```
     #[must_use]
-    pub fn then<EntryOut, Entry>(self,
-                                 next: Entry,
-                                 buffsize: usize)
-                                 -> Pipeline<EntryOut>
-        where Entry: PipelineEntry<Output, EntryOut> + Send + 'static,
-              EntryOut: Send
+    pub fn then<EntryOut, Entry>(
+        self,
+        next: Entry,
+        buffsize: usize,
+    ) -> Pipeline<EntryOut>
+    where
+        Entry: PipelineEntry<Output, EntryOut> + Send + 'static,
+        EntryOut: Send,
     {
         self.pipe(move |tx, rx| next.process(tx, rx), buffsize)
     }
@@ -126,14 +131,15 @@ impl<Output> Pipeline<Output>
     ///     }, buffsize)
     ///     .into_iter().collect();
     /// ```
-    pub fn pipe<EntryOut, Func>(self,
-                                func: Func,
-                                buffsize: usize)
-                                -> Pipeline<EntryOut>
-        where Func: FnOnce(mpsc::Receiver<Output>, mpsc::SyncSender<EntryOut>)
-                           -> (),
-              Func: Send + 'static,
-              EntryOut: Send
+    pub fn pipe<EntryOut, Func>(
+        self,
+        func: Func,
+        buffsize: usize,
+    ) -> Pipeline<EntryOut>
+    where
+        Func: FnOnce(mpsc::Receiver<Output>, mpsc::SyncSender<EntryOut>) -> (),
+        Func: Send + 'static,
+        EntryOut: Send,
     {
         let (tx, rx) = mpsc::sync_channel(buffsize);
         thread::spawn(move || { func(self.rx, tx); });
@@ -156,12 +162,14 @@ impl<Output> Pipeline<Output>
     ///     .map(|x| x*2, buffsize)
     ///     .into_iter().collect();
     /// ```
-    pub fn map<EntryOut, Func>(self,
-                               func: Func,
-                               buffsize: usize)
-                               -> Pipeline<EntryOut>
-        where Func: Fn(Output) -> EntryOut + Send + 'static,
-              EntryOut: Send
+    pub fn map<EntryOut, Func>(
+        self,
+        func: Func,
+        buffsize: usize,
+    ) -> Pipeline<EntryOut>
+    where
+        Func: Fn(Output) -> EntryOut + Send + 'static,
+        EntryOut: Send,
     {
         self.then(map::Mapper::new(func), buffsize)
     }
@@ -182,7 +190,8 @@ impl<Output> Pipeline<Output>
     ///     .into_iter().collect();
     /// ```
     pub fn filter<Func>(self, pred: Func, buffsize: usize) -> Pipeline<Output>
-        where Func: Fn(&Output) -> bool + Send + 'static
+    where
+        Func: Fn(&Output) -> bool + Send + 'static,
     {
         self.then(filter::Filter::new(pred), buffsize)
     }
@@ -208,7 +217,8 @@ impl<Output> Pipeline<Output>
 
 
 impl<Output> IntoIterator for Pipeline<Output>
-    where Output: Send
+where
+    Output: Send,
 {
     type Item = Output;
     type IntoIter = mpsc::IntoIter<Output>;
@@ -222,10 +232,11 @@ impl<Output> IntoIterator for Pipeline<Output>
 
 /// The trait that entries in the pipeline must implement
 pub trait PipelineEntry<In, Out> {
-    fn process<I: IntoIterator<Item = In>>(self,
-                                           rx: I,
-                                           tx: mpsc::SyncSender<Out>)
-                                           -> ();
+    fn process<I: IntoIterator<Item = In>>(
+        self,
+        rx: I,
+        tx: mpsc::SyncSender<Out>,
+    ) -> ();
 }
 
 
@@ -239,7 +250,8 @@ mod map {
     /// result to be send down the pipeline
     #[derive(Debug)]
     pub struct Mapper<In, Out, Func>
-        where Func: Fn(In) -> Out
+    where
+        Func: Fn(In) -> Out,
     {
         func: Func,
 
@@ -250,7 +262,8 @@ mod map {
 
     /// Make a new `Mapper` out of a function
     impl<In, Out, Func> Mapper<In, Out, Func>
-        where Func: Fn(In) -> Out
+    where
+        Func: Fn(In) -> Out,
     {
         pub fn new(func: Func) -> Self {
             Mapper {
@@ -262,11 +275,14 @@ mod map {
     }
 
     impl<In, Out, Func> PipelineEntry<In, Out> for Mapper<In, Out, Func>
-        where Func: Fn(In) -> Out
+    where
+        Func: Fn(In) -> Out,
     {
-        fn process<I: IntoIterator<Item = In>>(self,
-                                               rx: I,
-                                               tx: mpsc::SyncSender<Out>) {
+        fn process<I: IntoIterator<Item = In>>(
+            self,
+            rx: I,
+            tx: mpsc::SyncSender<Out>,
+        ) {
             for item in rx {
                 let mapped = (self.func)(item);
                 tx.send(mapped).expect("failed to send");
@@ -275,7 +291,8 @@ mod map {
     }
 
     impl<In, Out, Func> Clone for Mapper<In, Out, Func>
-        where Func: Fn(In) -> Out + Copy
+    where
+        Func: Fn(In) -> Out + Copy,
     {
         fn clone(&self) -> Self {
             Mapper::new(self.func)
@@ -283,7 +300,8 @@ mod map {
     }
 
     impl<In, Out, Func> Copy for Mapper<In, Out, Func>
-        where Func: Fn(In) -> Out + Copy
+    where
+        Func: Fn(In) -> Out + Copy,
     {
     }
 }
@@ -299,7 +317,8 @@ mod filter {
     /// further in the pipeline
     #[derive(Debug)]
     pub struct Filter<In, Func>
-        where Func: Fn(&In) -> bool
+    where
+        Func: Fn(&In) -> bool,
     {
         func: Func,
 
@@ -309,7 +328,8 @@ mod filter {
 
     /// Make a new `Filter` out of a predicate function
     impl<In, Func> Filter<In, Func>
-        where Func: Fn(&In) -> bool
+    where
+        Func: Fn(&In) -> bool,
     {
         pub fn new(func: Func) -> Self {
             Filter {
@@ -320,11 +340,14 @@ mod filter {
     }
 
     impl<In, Func> PipelineEntry<In, In> for Filter<In, Func>
-        where Func: Fn(&In) -> bool
+    where
+        Func: Fn(&In) -> bool,
     {
-        fn process<I: IntoIterator<Item = In>>(self,
-                                               rx: I,
-                                               tx: mpsc::SyncSender<In>) {
+        fn process<I: IntoIterator<Item = In>>(
+            self,
+            rx: I,
+            tx: mpsc::SyncSender<In>,
+        ) {
             for item in rx {
                 if (self.func)(&item) {
                     tx.send(item).expect("failed to send")
@@ -351,7 +374,8 @@ mod multiplex {
     /// across multiple threads
     #[derive(Debug)]
     pub struct Multiplex<In, Out, Entry>
-        where Entry: PipelineEntry<In, Out> + Send
+    where
+        Entry: PipelineEntry<In, Out> + Send,
     {
         entries: Vec<Entry>,
         buffsize: usize,
@@ -365,9 +389,10 @@ mod multiplex {
     ///
     /// Note: this is only applicable where the `PipelineEntry` implements Copy,
     /// which due to [Rust #28229](https://github.com/rust-lang/rust/issues/28229)
-    /// is not true of closure functions
+    /// is not true of closures
     impl<In, Out, Entry> Multiplex<In, Out, Entry>
-        where Entry: PipelineEntry<In, Out> + Send + Copy
+    where
+        Entry: PipelineEntry<In, Out> + Send + Copy,
     {
         pub fn from(entry: Entry, workers: usize, buffsize: usize) -> Self {
             Self::new((0..workers).map(|_| entry).collect(), buffsize)
@@ -375,7 +400,8 @@ mod multiplex {
     }
 
     impl<In, Out, Entry> Multiplex<In, Out, Entry>
-        where Entry: PipelineEntry<In, Out> + Send
+    where
+        Entry: PipelineEntry<In, Out> + Send,
     {
         pub fn new(entries: Vec<Entry>, buffsize: usize) -> Self {
             Multiplex {
@@ -387,19 +413,22 @@ mod multiplex {
         }
     }
 
-    #[cfg(feature="chan")]
+    #[cfg(feature = "chan")]
     extern crate chan;
 
     impl<In, Out, Entry> PipelineEntry<In, Out> for Multiplex<In, Out, Entry>
-        where Entry: PipelineEntry<In, Out> + Send + 'static,
-              In: Send + 'static,
-              Out: Send + 'static
+    where
+        Entry: PipelineEntry<In, Out> + Send + 'static,
+        In: Send + 'static,
+        Out: Send + 'static,
     {
-        fn process<I: IntoIterator<Item = In>>(self,
-                                               rx: I,
-                                               tx: mpsc::SyncSender<Out>) {
+        fn process<I: IntoIterator<Item = In>>(
+            self,
+            rx: I,
+            tx: mpsc::SyncSender<Out>,
+        ) {
 
-            if cfg!(feature="chan") {
+            if cfg!(feature = "chan") {
                 // if we're compiled when `chan` support, use that
                 let (chan_tx, chan_rx) = chan::sync(self.buffsize);
 
@@ -407,9 +436,9 @@ mod multiplex {
                     let entry_rx = chan_rx.clone();
                     let entry_tx = tx.clone();
 
-                    thread::spawn(move || {
-                        entry.process(entry_rx, entry_tx);
-                    });
+                    thread::spawn(
+                        move || { entry.process(entry_rx, entry_tx); },
+                    );
                 }
 
                 for item in rx {
@@ -427,12 +456,14 @@ mod multiplex {
                     let entry_rx = chan_rx.clone();
                     let entry_tx = tx.clone();
 
-                    thread::spawn(move || { entry.process(entry_rx, entry_tx); });
+                    thread::spawn(
+                        move || { entry.process(entry_rx, entry_tx); },
+                    );
                 }
 
-                // now we copy the work from rx into the shared channel. the workers
-                // will be putting their results into tx directly so this is the
-                // only shuffling around that we have to do
+                // now we copy the work from rx into the shared channel. the
+                // workers will be putting their results into tx directly so
+                // this is the only shuffling around that we have to do
                 for item in rx {
                     master_tx.send(item).expect("failed subsend");
                 }
@@ -441,13 +472,15 @@ mod multiplex {
     }
 
     struct LockedRx<T>
-        where T: Send
+    where
+        T: Send,
     {
         lockbox: Arc<Mutex<mpsc::Receiver<T>>>,
     }
 
     impl<T> LockedRx<T>
-        where T: Send
+    where
+        T: Send,
     {
         pub fn new(recv: mpsc::Receiver<T>) -> Self {
             Self { lockbox: Arc::new(Mutex::new(recv)) }
@@ -455,7 +488,8 @@ mod multiplex {
     }
 
     impl<T> Clone for LockedRx<T>
-        where T: Send
+    where
+        T: Send,
     {
         fn clone(&self) -> Self {
             Self { lockbox: self.lockbox.clone() }
@@ -463,7 +497,8 @@ mod multiplex {
     }
 
     impl<T> Iterator for LockedRx<T>
-        where T: Send
+    where
+        T: Send,
     {
         type Item = T;
 
@@ -501,8 +536,8 @@ mod tests {
         let source: Vec<i32> = (1..1000).collect();
         let expect: Vec<i32> = source.iter().map(|x| x * 2).collect();
 
-        let pbb: Pipeline<i32> =
-            Pipeline::new(source, buffsize).map(|i| i * 2, buffsize);
+        let pbb: Pipeline<i32> = Pipeline::new(source, buffsize)
+            .map(|i| i * 2, buffsize);
         let produced: Vec<i32> = pbb.into_iter().collect();
 
         assert_eq!(produced, expect);
@@ -550,11 +585,14 @@ mod tests {
         let expect: Vec<u64> =
             source.clone().into_iter().map(fib_work).collect();
 
-        let pbb: Pipeline<u64> = Pipeline::new(source, buffsize)
-            .then(multiplex::Multiplex::from(map::Mapper::new(fib_work),
-                                             workers,
-                                             buffsize),
-                  buffsize);
+        let pbb: Pipeline<u64> = Pipeline::new(source, buffsize).then(
+            multiplex::Multiplex::from(
+                map::Mapper::new(fib_work),
+                workers,
+                buffsize,
+            ),
+            buffsize,
+        );
         let mut produced: Vec<u64> = pbb.into_iter().collect();
 
         produced.sort(); // these may arrive out of order
@@ -569,13 +607,13 @@ mod tests {
         let source: Vec<i32> = (1..1000).collect();
         let expect: Vec<i32> = source.iter().map(|x| x * 2).collect();
 
-        let pbb: Pipeline<i32> = Pipeline::new(source, buffsize)
-            .then(multiplex::Multiplex::new((0..workers)
-                .map(|_| {
-                        map::Mapper::new(|i| i * 2)
-                    }).collect(),
-                buffsize),
-            buffsize);
+        let pbb: Pipeline<i32> = Pipeline::new(source, buffsize).then(
+            multiplex::Multiplex::new(
+                (0..workers).map(|_| map::Mapper::new(|i| i * 2)).collect(),
+                buffsize,
+            ),
+            buffsize,
+        );
         let mut produced: Vec<i32> = pbb.into_iter().collect();
 
         produced.sort(); // these may arrive out of order
@@ -612,14 +650,15 @@ mod tests {
             .filter(|x| x % 2 == 0)
             .collect();
 
-        let pbb: Pipeline<i32> = Pipeline::new(source, buffsize)
-            .pipe(|in_, out| for item in in_ {
-                      let item = item + 1;
-                      if item % 2 == 0 {
-                          out.send(item).expect("failed to send")
-                      }
-                  },
-                  10);
+        let pbb: Pipeline<i32> = Pipeline::new(source, buffsize).pipe(
+            |in_, out| for item in in_ {
+                let item = item + 1;
+                if item % 2 == 0 {
+                    out.send(item).expect("failed to send")
+                }
+            },
+            10,
+        );
         let produced: Vec<i32> = pbb.into_iter().collect();
 
         assert_eq!(produced, expect);

@@ -1,4 +1,4 @@
-#![feature(test)] extern crate test;
+#![feature(test)]extern crate test;
 
 extern crate pipelines;
 
@@ -22,33 +22,25 @@ const BUFFSIZE: usize = 5;
 
 #[bench]
 fn bench_heavy_single(b: &mut test::Bencher) {
-    b.iter(move || {
-        single(HEAVY_WORK_COUNT, HEAVY_WORK_FACTOR);
-    });
+    b.iter(move || { single(HEAVY_WORK_COUNT, HEAVY_WORK_FACTOR); });
 }
 
 
 #[bench]
 fn bench_light_single(b: &mut test::Bencher) {
-    b.iter(move || {
-        single(LIGHT_WORK_COUNT, LIGHT_WORK_FACTOR);
-    });
+    b.iter(move || { single(LIGHT_WORK_COUNT, LIGHT_WORK_FACTOR); });
 }
 
 
 #[bench]
 fn bench_heavy_multi(b: &mut test::Bencher) {
-    b.iter(move || {
-        multi(HEAVY_WORK_COUNT, HEAVY_WORK_FACTOR);
-    });
+    b.iter(move || { multi(HEAVY_WORK_COUNT, HEAVY_WORK_FACTOR); });
 }
 
 
 #[bench]
 fn bench_light_multi(b: &mut test::Bencher) {
-    b.iter(move || {
-        multi(LIGHT_WORK_COUNT, LIGHT_WORK_FACTOR);
-    });
+    b.iter(move || { multi(LIGHT_WORK_COUNT, LIGHT_WORK_FACTOR); });
 }
 
 
@@ -67,7 +59,7 @@ fn multi(work_count: u64, work_factor: u64) {
     for _ in 0..THREAD_COUNT {
         let n = work_factor.clone();
         entries.push(Mapper::new(move |_| fib_work(n)))
-    };
+    }
 
     Pipeline::new(source, BUFFSIZE)
         .then(Multiplex::new(entries, BUFFSIZE), BUFFSIZE)
