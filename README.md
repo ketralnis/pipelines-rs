@@ -17,7 +17,7 @@ let buffsize = 5;
 fn fibonacci(n:u64)->u64{if n<2 {1} else {fibonacci(n-1) + fibonacci(n-2)}}
 
 let nums: Vec<u64> = (0..10).collect();
-let fibs: Vec<u64> = Pipeline::new(nums, buffsize)
+let fibs: Vec<u64> = Pipeline::from(nums, buffsize)
     .map(fibonacci, 10)
     .into_iter().collect();
 ```
@@ -35,7 +35,7 @@ let workers = 2;
 fn fibonacci(n:u64)->u64{if n<2 {1} else {fibonacci(n-1) + fibonacci(n-2)}}
 
 let nums: Vec<u64> = (0..10).collect();
-let fibs: Vec<u64> = Pipeline::new(nums, buffsize)
+let fibs: Vec<u64> = Pipeline::from(nums, buffsize)
     .then(Multiplex::from(Mapper::new(fibonacci), workers, buffsize), buffsize)
     .map(|x| x*2, buffsize)
     .into_iter().collect();

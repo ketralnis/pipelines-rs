@@ -1,9 +1,8 @@
 [package]
 name = "pipelines"
-version = "0.1.1"
+version = "0.2.0"
 authors = ["David King <dking@ketralnis.com>"]
 license = "BSD-2-Clause"
-license_file = "LICENSE"
 description = "A tool for constructing multi-threaded pipelines of execution"
 repository = "https://github.com/ketralnis/pipelines-rs"
 readme = "README.md"

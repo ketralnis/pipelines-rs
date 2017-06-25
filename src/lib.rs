@@ -1,5 +1,3 @@
-#![warn(missing_docs)]
-
 //! A tool for constructing multi-threaded pipelines of execution
 //!
 //! A `Pipeline` consists in one or more `PipelineEntry`s that each runs in its
@@ -19,7 +17,7 @@
 //! fn fibonacci(n:u64)->u64{if n<2 {1} else {fibonacci(n-1) + fibonacci(n-2)}}
 //!
 //! let nums: Vec<u64> = (0..10).collect();
-//! let fibs: Vec<u64> = Pipeline::new(nums, buffsize)
+//! let fibs: Vec<u64> = Pipeline::from(nums, buffsize)
 //!     .map(fibonacci, 10)
 //!     .into_iter().collect();
 //! ```
@@ -34,7 +32,7 @@
 //! fn fibonacci(n:u64)->u64{if n<2 {1} else {fibonacci(n-1) + fibonacci(n-2)}}
 //!
 //! let nums: Vec<u64> = (0..10).collect();
-//! let fibs: Vec<u64> = Pipeline::new(nums, buffsize)
+//! let fibs: Vec<u64> = Pipeline::from(nums, buffsize)
 //!     .then(Multiplex::from(Mapper::new(fibonacci), workers, buffsize), buffsize)
 //!     .map(|x| x*2, buffsize)
 //!     .into_iter().collect();
@@ -63,17 +61,42 @@ impl<Output> Pipeline<Output>
 where
     Output: Send,
 {
-    /// Start a pipeline and start feeding it from `source`
+    /// Start a pipeline from an IntoIterator
     #[must_use]
-    pub fn new<I>(source: I, buffsize: usize) -> Pipeline<Output>
+    pub fn from<I>(source: I, buffsize: usize) -> Pipeline<Output>
     where
         I: IntoIterator<Item = Output> + Send + 'static,
     {
-        let (tx, rx) = mpsc::sync_channel(buffsize);
-        thread::spawn(move || for item in source {
-            tx.send(item).expect("failed send (super)");
-        });
+        Self::new(
+            move |tx| for item in source {
+                tx.send(item).expect("failed send")
+            },
+            buffsize,
+        )
+    }
 
+    /// Start a Pipeline
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use std::io::{self, BufRead};
+    /// use pipelines::Pipeline;
+    /// let buffsize = 20;
+    /// let pl = Pipeline::new(|tx| {
+    ///     let stdin = io::stdin();
+    ///     for line in stdin.lock().lines() {
+    ///         tx.send(line.unwrap()).unwrap();
+    ///     }
+    /// }, buffsize);
+    /// ```
+    #[must_use]
+    pub fn new<F>(func: F, buffsize: usize) -> Self
+    where
+        F: FnOnce(mpsc::SyncSender<Output>) -> () + Send + 'static
+    {
+        let (tx, rx) = mpsc::sync_channel(buffsize);
+        thread::spawn(move || func(tx));
         Pipeline { rx }
     }
 
@@ -90,7 +113,7 @@ where
     /// fn fibonacci(n:u64)->u64{if n<2 {1} else {fibonacci(n-1) + fibonacci(n-2)}}
     ///
     /// let nums: Vec<u64> = (0..10).collect();
-    /// let fibs: Vec<u64> = Pipeline::new(nums, buffsize)
+    /// let fibs: Vec<u64> = Pipeline::from(nums, buffsize)
     ///     .then(Multiplex::from(Mapper::new(fibonacci), workers, buffsize), buffsize)
     ///     .map(|x| x*2, buffsize)
     ///     .into_iter().collect();
@@ -121,7 +144,7 @@ where
     /// let buffsize = 5;
     /// let directories = vec!["/usr/bin", "/usr/local/bin"];
     ///
-    /// let found_files: Vec<PathBuf> = Pipeline::new(directories, buffsize)
+    /// let found_files: Vec<PathBuf> = Pipeline::from(directories, buffsize)
     ///     .pipe(|dirs, out| {
     ///         for dir in dirs {
     ///             for path in fs::read_dir(dir).unwrap() {
@@ -158,7 +181,7 @@ where
     /// let nums: Vec<u64> = (0..10).collect();
     /// let buffsize = 5;
     ///
-    /// let doubled: Vec<u64> = Pipeline::new(nums, buffsize)
+    /// let doubled: Vec<u64> = Pipeline::from(nums, buffsize)
     ///     .map(|x| x*2, buffsize)
     ///     .into_iter().collect();
     /// ```
@@ -185,7 +208,7 @@ where
     /// let nums: Vec<u64> = (0..10).collect();
     /// let buffsize = 5;
     ///
-    /// let evens: Vec<u64> = Pipeline::new(nums, buffsize)
+    /// let evens: Vec<u64> = Pipeline::from(nums, buffsize)
     ///     .filter(|x| x%2 == 0, buffsize)
     ///     .into_iter().collect();
     /// ```
@@ -206,7 +229,7 @@ where
     /// use pipeline::Pipeline;
     /// use sys::fs;
     ///
-    /// Pipeline::new(vec!["/tmp/file1", "/tmp/file2"], 1)
+    /// Pipeline::from(vec!["/tmp/file1", "/tmp/file2"], 1)
     ///     .map(|fname| fs::remove_file(fname).unwrap())
     ///     .drain(); // no results to pass on
     /// ```
@@ -523,7 +546,7 @@ mod tests {
     fn simple() {
         let buffsize: usize = 10;
         let source: Vec<i32> = vec![1, 2, 3];
-        let pbb: Pipeline<i32> = Pipeline::new(source, buffsize);
+        let pbb: Pipeline<i32> = Pipeline::from(source, buffsize);
         let produced: Vec<i32> = pbb.into_iter().collect();
 
         assert_eq!(produced, vec![1, 2, 3]);
@@ -536,7 +559,7 @@ mod tests {
         let source: Vec<i32> = (1..1000).collect();
         let expect: Vec<i32> = source.iter().map(|x| x * 2).collect();
 
-        let pbb: Pipeline<i32> = Pipeline::new(source, buffsize)
+        let pbb: Pipeline<i32> = Pipeline::from(source, buffsize)
             .map(|i| i * 2, buffsize);
         let produced: Vec<i32> = pbb.into_iter().collect();
 
@@ -550,7 +573,7 @@ mod tests {
         let expect: Vec<i32> =
             source.iter().map(|x| (x * 2) * (x * 2)).collect();
 
-        let pbb: Pipeline<i32> = Pipeline::new(source, buffsize)
+        let pbb: Pipeline<i32> = Pipeline::from(source, buffsize)
             .map(|i| i * 2, buffsize)
             .map(|i| i * i, buffsize);
         let produced: Vec<i32> = pbb.into_iter().collect();
@@ -585,7 +608,7 @@ mod tests {
         let expect: Vec<u64> =
             source.clone().into_iter().map(fib_work).collect();
 
-        let pbb: Pipeline<u64> = Pipeline::new(source, buffsize).then(
+        let pbb: Pipeline<u64> = Pipeline::from(source, buffsize).then(
             multiplex::Multiplex::from(
                 map::Mapper::new(fib_work),
                 workers,
@@ -607,7 +630,7 @@ mod tests {
         let source: Vec<i32> = (1..1000).collect();
         let expect: Vec<i32> = source.iter().map(|x| x * 2).collect();
 
-        let pbb: Pipeline<i32> = Pipeline::new(source, buffsize).then(
+        let pbb: Pipeline<i32> = Pipeline::from(source, buffsize).then(
             multiplex::Multiplex::new(
                 (0..workers).map(|_| map::Mapper::new(|i| i * 2)).collect(),
                 buffsize,
@@ -631,7 +654,7 @@ mod tests {
             .filter(|x| x % 2 == 0)
             .collect();
 
-        let pbb: Pipeline<i32> = Pipeline::new(source, buffsize)
+        let pbb: Pipeline<i32> = Pipeline::from(source, buffsize)
             .map(|i| i + 1, buffsize)
             .filter(|i| i % 2 == 0, buffsize);
         let produced: Vec<i32> = pbb.into_iter().collect();
@@ -650,7 +673,7 @@ mod tests {
             .filter(|x| x % 2 == 0)
             .collect();
 
-        let pbb: Pipeline<i32> = Pipeline::new(source, buffsize).pipe(
+        let pbb: Pipeline<i32> = Pipeline::from(source, buffsize).pipe(
             |in_, out| for item in in_ {
                 let item = item + 1;
                 if item % 2 == 0 {
