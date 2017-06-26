@@ -446,10 +446,18 @@ mod multiplex {
         Out: Send + 'static,
     {
         fn process<I: IntoIterator<Item = In>>(
-            self,
+            mut self,
             rx: I,
             tx: mpsc::SyncSender<Out>,
         ) {
+            if self.entries.len() == 1 {
+                // if there's only one entry we can skip most of the work.
+                // this way client libraries can just create multiplexers
+                // without having to worry about wasting performance in the
+                // simple case
+                let entry = self.entries.pop().expect("len 1 but no entries?");
+                return entry.process(rx, tx);
+            }
 
             if cfg!(feature = "chan") {
                 // if we're compiled when `chan` support, use that
@@ -469,9 +477,9 @@ mod multiplex {
                 }
 
             } else {
-                // if we weren't, use a Mutex<rx>. workers will read their work
-                // out of this channel but send their results directly into the
-                // regular tx channel
+                // if we weren't compiled with `chan` use a Mutex<rx>. workers
+                // will read their work out of this channel but send their
+                // results directly into the regular tx channel
                 let (master_tx, chan_rx) = mpsc::sync_channel(self.buffsize);
                 let chan_rx = LockedRx::new(chan_rx);
 
