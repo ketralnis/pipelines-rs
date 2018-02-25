@@ -61,9 +61,9 @@ impl<Out> Sender<Out> {
         self.tx.send(out).expect("failed send");
     }
 
-    fn new(config: PipelineConfig) -> (Self, mpsc::Receiver<Out>) {
+    fn pair(config: PipelineConfig) -> (Self, Receiver<Out>) {
         let (tx, rx) = mpsc::sync_channel(config.buff_size);
-        (Self { tx, config }, rx)
+        (Self { tx, config }, Receiver { rx })
     }
 }
 
@@ -73,6 +73,46 @@ impl<Out> Clone for Sender<Out> {
             tx: self.tx.clone(),
             config: self.config.clone(),
         }
+    }
+}
+
+#[derive(Debug)]
+pub struct Receiver<In> {
+    rx: mpsc::Receiver<In>,
+}
+
+impl<In> Receiver<In> {
+    pub fn recv(&mut self) -> Option<In> {
+        match self.rx.recv() {
+            Ok(val) => Some(val),
+            Err(_recv_err) => {
+                // can only fail on hangup
+                None
+            }
+        }
+    }
+}
+
+impl<In> IntoIterator for Receiver<In> {
+    type Item = In;
+    type IntoIter = ReceiverIntoIterator<In>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        ReceiverIntoIterator {
+            iter: self.rx.into_iter(),
+        }
+    }
+}
+
+pub struct ReceiverIntoIterator<In> {
+    iter: mpsc::IntoIter<In>,
+}
+
+impl<In> Iterator for ReceiverIntoIterator<In> {
+    type Item = In;
+
+    fn next(&mut self) -> Option<In> {
+        self.iter.next()
     }
 }
 
@@ -102,7 +142,7 @@ pub struct Pipeline<Output>
 where
     Output: Send + 'static,
 {
-    rx: mpsc::Receiver<Output>,
+    rx: Receiver<Output>,
     config: PipelineConfig,
 }
 
@@ -129,7 +169,7 @@ where
         F: FnOnce(Sender<Output>) -> () + Send + 'static,
     {
         let config = PipelineConfig::default();
-        let (tx, rx) = Sender::new(config);
+        let (tx, rx) = Sender::pair(config);
         thread::spawn(move || func(tx));
         Pipeline { rx, config }
     }
@@ -205,12 +245,12 @@ where
     /// ```
     pub fn pipe<EntryOut, Func>(self, func: Func) -> Pipeline<EntryOut>
     where
-        Func: FnOnce(mpsc::Receiver<Output>, Sender<EntryOut>) -> (),
+        Func: FnOnce(Receiver<Output>, Sender<EntryOut>) -> (),
         Func: Send + 'static,
         EntryOut: Send,
     {
         let config = self.config.clone();
-        let (tx, rx) = Sender::new(config.clone());
+        let (tx, rx) = Sender::pair(config.clone());
         thread::spawn(move || {
             func(self.rx, tx);
         });
@@ -330,9 +370,9 @@ where
     Output: Send,
 {
     type Item = Output;
-    type IntoIter = mpsc::IntoIter<Output>;
+    type IntoIter = ReceiverIntoIterator<Output>;
 
-    fn into_iter(self) -> mpsc::IntoIter<Output> {
+    fn into_iter(self) -> ReceiverIntoIterator<Output> {
         self.rx.into_iter()
     }
 }
@@ -456,9 +496,8 @@ mod multiplex {
     use std::marker::PhantomData;
     use std::sync::{Arc, Mutex};
     use std::thread;
-    use std::sync::mpsc;
 
-    use super::{PipelineConfig, PipelineEntry, Sender};
+    use super::{PipelineConfig, PipelineEntry, Receiver, Sender};
 
     /// A meta pipeline entry that distributes the work of a `PipelineEntry`
     /// across multiple threads
@@ -550,7 +589,7 @@ mod multiplex {
                 // results directly into the regular tx channel
 
                 let (master_tx, chan_rx) =
-                    Sender::new(PipelineConfig::default());
+                    Sender::pair(PipelineConfig::default());
                 let chan_rx = LockedRx::new(chan_rx);
 
                 for entry in self.entries {
@@ -576,14 +615,14 @@ mod multiplex {
     where
         T: Send,
     {
-        lockbox: Arc<Mutex<mpsc::Receiver<T>>>,
+        lockbox: Arc<Mutex<Receiver<T>>>,
     }
 
     impl<T> LockedRx<T>
     where
         T: Send,
     {
-        pub fn new(recv: mpsc::Receiver<T>) -> Self {
+        pub fn new(recv: Receiver<T>) -> Self {
             Self {
                 lockbox: Arc::new(Mutex::new(recv)),
             }
@@ -608,13 +647,7 @@ mod multiplex {
         type Item = T;
 
         fn next(&mut self) -> Option<T> {
-            match self.lockbox.lock().expect("failed unwrap mutex").recv() {
-                Ok(val) => Some(val),
-                Err(_recv_err) => {
-                    // can only fail on hangup
-                    None
-                }
-            }
+            self.lockbox.lock().expect("failed unwrap mutex").recv()
         }
     }
 }
