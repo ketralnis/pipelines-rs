@@ -13,12 +13,11 @@
 //! ```rust
 //! use pipelines::Pipeline;
 //!
-//! let buffsize = 5;
 //! fn fibonacci(n:u64)->u64{if n<2 {1} else {fibonacci(n-1) + fibonacci(n-2)}}
 //!
 //! let nums: Vec<u64> = (0..10).collect();
-//! let fibs: Vec<u64> = Pipeline::from(nums, buffsize)
-//!     .map(fibonacci, 10)
+//! let fibs: Vec<u64> = Pipeline::from(nums)
+//!     .map(fibonacci)
 //!     .into_iter().collect();
 //! ```
 //!
@@ -27,14 +26,13 @@
 //! ```rust
 //! use pipelines::{Pipeline, Mapper, Multiplex};
 //!
-//! let buffsize = 5;
 //! let workers = 2;
 //! fn fibonacci(n:u64)->u64{if n<2 {1} else {fibonacci(n-1) + fibonacci(n-2)}}
 //!
 //! let nums: Vec<u64> = (0..10).collect();
-//! let fibs: Vec<u64> = Pipeline::from(nums, buffsize)
-//!     .then(Multiplex::from(Mapper::new(fibonacci), workers, buffsize), buffsize)
-//!     .map(|x| x*2, buffsize)
+//! let fibs: Vec<u64> = Pipeline::from(nums)
+//!     .then(Multiplex::from(Mapper::new(fibonacci), workers))
+//!     .map(|x| x*2)
 //!     .into_iter().collect();
 //! ```
 
@@ -50,56 +48,68 @@ pub use map::Mapper;
 pub use multiplex::Multiplex;
 
 #[derive(Debug)]
-pub struct Pipeline<Output>
-where
-    Output: Send + 'static,
-{
-    rx: mpsc::Receiver<Output>,
-}
-
-#[derive(Debug)]
 pub struct Sender<Out> {
     tx: mpsc::SyncSender<Out>,
+    config: PipelineConfig,
 }
 
 impl<Out> Sender<Out> {
-    /// Transmit a value to the next state in the pipeline
+    /// Transmit a value to the next stage in the pipeline
     ///
     /// Panics on failure
     pub fn send(&self, out: Out) -> () {
         self.tx.send(out).expect("failed send");
     }
 
-    fn new(tx: mpsc::SyncSender<Out>) -> Self {
-        Self { tx }
+    fn new(config: PipelineConfig) -> (Self, mpsc::Receiver<Out>) {
+        let (tx, rx) = mpsc::sync_channel(config.buff_size);
+        (Self { tx, config }, rx)
     }
 }
 
 impl<Out> Clone for Sender<Out> {
     fn clone(&self) -> Self {
-        Self::new(self.tx.clone())
+        Self {
+            tx: self.tx.clone(),
+            config: self.config.clone(),
+        }
     }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct PipelineConfig {
+    buff_size: usize,
+}
+
+impl PipelineConfig {
+    /// Set the size of the internal mpsc buffer.
+    ///
+    /// This can affect the effective parallelism and the length of the backlog between stages when
+    /// different stages of the pipeline take different amounts of time
+    pub fn buff_size(self, buff_size: usize) -> Self {
+        Self { buff_size, ..self }
+    }
+}
+
+impl Default for PipelineConfig {
+    fn default() -> Self {
+        Self { buff_size: 10 }
+    }
+}
+
+#[derive(Debug)]
+pub struct Pipeline<Output>
+where
+    Output: Send + 'static,
+{
+    rx: mpsc::Receiver<Output>,
+    config: PipelineConfig,
 }
 
 impl<Output> Pipeline<Output>
 where
     Output: Send,
 {
-    /// Start a pipeline from an IntoIterator
-    pub fn from<I>(source: I, buffsize: usize) -> Pipeline<Output>
-    where
-        I: IntoIterator<Item = Output> + Send + 'static,
-    {
-        Self::new(
-            move |tx| {
-                for item in source {
-                    tx.send(item);
-                }
-            },
-            buffsize,
-        )
-    }
-
     /// Start a Pipeline
     ///
     /// # Examples
@@ -107,21 +117,43 @@ where
     /// ```rust
     /// use std::io::{self, BufRead};
     /// use pipelines::Pipeline;
-    /// let buffsize = 20;
     /// let pl = Pipeline::new(|tx| {
     ///     let stdin = io::stdin();
     ///     for line in stdin.lock().lines() {
     ///         tx.send(line.unwrap());
     ///     }
-    /// }, buffsize);
+    /// });
     /// ```
-    pub fn new<F>(func: F, buffsize: usize) -> Self
+    pub fn new<F>(func: F) -> Self
     where
         F: FnOnce(Sender<Output>) -> () + Send + 'static,
     {
-        let (tx, rx) = mpsc::sync_channel(buffsize);
-        thread::spawn(move || func(Sender::new(tx)));
-        Pipeline { rx }
+        let config = PipelineConfig::default();
+        let (tx, rx) = Sender::new(config);
+        thread::spawn(move || func(tx));
+        Pipeline { rx, config }
+    }
+
+    /// Start a pipeline from an IntoIterator
+    pub fn from<I>(source: I) -> Pipeline<Output>
+    where
+        I: IntoIterator<Item = Output> + Send + 'static,
+    {
+        Self::new(move |tx| {
+            for item in source {
+                tx.send(item);
+            }
+        })
+    }
+
+    /// Change the configuration of the pipeline
+    ///
+    /// Note that this applies to stages occurring *after* the config, not before.
+    pub fn configure(self, config: PipelineConfig) -> Self {
+        Pipeline {
+            rx: self.rx,
+            config,
+        }
     }
 
     /// Given another `PipelineEntry` `next`, send the results of the previous
@@ -132,26 +164,21 @@ where
     /// ```rust
     /// use pipelines::{Pipeline, Multiplex, Mapper};
     ///
-    /// let buffsize = 5;
     /// let workers = 2;
     /// fn fibonacci(n:u64)->u64{if n<2 {1} else {fibonacci(n-1) + fibonacci(n-2)}}
     ///
     /// let nums: Vec<u64> = (0..10).collect();
-    /// let fibs: Vec<u64> = Pipeline::from(nums, buffsize)
-    ///     .then(Multiplex::from(Mapper::new(fibonacci), workers, buffsize), buffsize)
-    ///     .map(|x| x*2, buffsize)
+    /// let fibs: Vec<u64> = Pipeline::from(nums)
+    ///     .then(Multiplex::from(Mapper::new(fibonacci), workers))
+    ///     .map(|x| x*2)
     ///     .into_iter().collect();
     /// ```
-    pub fn then<EntryOut, Entry>(
-        self,
-        next: Entry,
-        buffsize: usize,
-    ) -> Pipeline<EntryOut>
+    pub fn then<EntryOut, Entry>(self, next: Entry) -> Pipeline<EntryOut>
     where
         Entry: PipelineEntry<Output, EntryOut> + Send + 'static,
         EntryOut: Send,
     {
-        self.pipe(move |tx, rx| next.process(tx, rx), buffsize)
+        self.pipe(move |tx, rx| next.process(tx, rx))
     }
 
     /// Express a `PipelineEntry` as a closure
@@ -164,35 +191,31 @@ where
     /// use pipelines::Pipeline;
     /// use std::fs;
     /// use std::path::PathBuf;
-    /// let buffsize = 5;
     /// let directories = vec!["/usr/bin", "/usr/local/bin"];
     ///
-    /// let found_files: Vec<PathBuf> = Pipeline::from(directories, buffsize)
+    /// let found_files: Vec<PathBuf> = Pipeline::from(directories)
     ///     .pipe(|dirs, out| {
     ///         for dir in dirs {
     ///             for path in fs::read_dir(dir).unwrap() {
     ///                 out.send(path.unwrap().path());
     ///             }
     ///         }
-    ///     }, buffsize)
+    ///     })
     ///     .into_iter().collect();
     /// ```
-    pub fn pipe<EntryOut, Func>(
-        self,
-        func: Func,
-        buffsize: usize,
-    ) -> Pipeline<EntryOut>
+    pub fn pipe<EntryOut, Func>(self, func: Func) -> Pipeline<EntryOut>
     where
         Func: FnOnce(mpsc::Receiver<Output>, Sender<EntryOut>) -> (),
         Func: Send + 'static,
         EntryOut: Send,
     {
-        let (tx, rx) = mpsc::sync_channel(buffsize);
+        let config = self.config.clone();
+        let (tx, rx) = Sender::new(config.clone());
         thread::spawn(move || {
-            func(self.rx, Sender::new(tx));
+            func(self.rx, tx);
         });
 
-        Pipeline { rx }
+        Pipeline { rx, config: config }
     }
 
     /// Call `func` on every entry in the pipeline
@@ -204,22 +227,17 @@ where
     /// ```rust
     /// use pipelines::Pipeline;
     /// let nums: Vec<u64> = (0..10).collect();
-    /// let buffsize = 5;
     ///
-    /// let doubled: Vec<u64> = Pipeline::from(nums, buffsize)
-    ///     .map(|x| x*2, buffsize)
+    /// let doubled: Vec<u64> = Pipeline::from(nums)
+    ///     .map(|x| x*2)
     ///     .into_iter().collect();
     /// ```
-    pub fn map<EntryOut, Func>(
-        self,
-        func: Func,
-        buffsize: usize,
-    ) -> Pipeline<EntryOut>
+    pub fn map<EntryOut, Func>(self, func: Func) -> Pipeline<EntryOut>
     where
         Func: Fn(Output) -> EntryOut + Send + 'static,
         EntryOut: Send,
     {
-        self.then(map::Mapper::new(func), buffsize)
+        self.then(map::Mapper::new(func))
     }
 
     /// Pass items into the next `PipelineEntry` only if `pred` is true
@@ -231,17 +249,16 @@ where
     /// ```rust
     /// use pipelines::Pipeline;
     /// let nums: Vec<u64> = (0..10).collect();
-    /// let buffsize = 5;
     ///
-    /// let evens: Vec<u64> = Pipeline::from(nums, buffsize)
-    ///     .filter(|x| x%2 == 0, buffsize)
+    /// let evens: Vec<u64> = Pipeline::from(nums)
+    ///     .filter(|x| x%2 == 0)
     ///     .into_iter().collect();
     /// ```
-    pub fn filter<Func>(self, pred: Func, buffsize: usize) -> Pipeline<Output>
+    pub fn filter<Func>(self, pred: Func) -> Pipeline<Output>
     where
         Func: Fn(&Output) -> bool + Send + 'static,
     {
-        self.then(filter::Filter::new(pred), buffsize)
+        self.then(filter::Filter::new(pred))
     }
 
     /// Consume this Pipeline without collecting the results
@@ -253,10 +270,9 @@ where
     /// ```rust
     /// use pipelines::Pipeline;
     /// let nums: Vec<u64> = (0..10).collect();
-    /// let buffsize = 5;
     ///
-    /// Pipeline::from(nums, buffsize)
-    ///     .map(|fname| /* something with side-effects */ (), buffsize)
+    /// Pipeline::from(nums)
+    ///     .map(|fname| /* something with side-effects */ ())
     ///     .drain(); // no results to pass on
     /// ```
     pub fn drain(self) {
@@ -280,41 +296,32 @@ where
     /// ```rust
     /// use pipelines::Pipeline;
     /// let nums: Vec<u64> = (0..10).collect();
-    /// let buffsize = 5;
     ///
     /// // find the sum of the even/odd numbers in the doubles of 0..10
-    /// let biggests: Vec<(bool, u64)> = Pipeline::from(nums, buffsize)
-    ///     .map(|x| (x % 2 == 0, x*2), buffsize)
-    ///     .reduce(|evenness, nums| (evenness, *nums.iter().max().unwrap()),
-    ///             buffsize)
+    /// let biggests: Vec<(bool, u64)> = Pipeline::from(nums)
+    ///     .map(|x| (x % 2 == 0, x*2))
+    ///     .reduce(|evenness, nums| (evenness, *nums.iter().max().unwrap()))
     ///     .into_iter().collect();
     /// ```
-    pub fn reduce<EntryOut, Func>(
-        self,
-        func: Func,
-        buffsize: usize,
-    ) -> Pipeline<EntryOut>
+    pub fn reduce<EntryOut, Func>(self, func: Func) -> Pipeline<EntryOut>
     where
         Func: Fn(OutKey, Vec<OutValue>) -> EntryOut + Send + 'static,
         EntryOut: Send,
     {
-        self.pipe(
-            move |rx, tx| {
-                // gather up all of the values and group them by key
-                let mut by_key: HashMap<OutKey, Vec<OutValue>> = HashMap::new();
-                for inbound in rx {
-                    let (key, value) = inbound;
-                    by_key.entry(key).or_insert_with(Vec::new).push(value)
-                }
+        self.pipe(move |rx, tx| {
+            // gather up all of the values and group them by key
+            let mut by_key: HashMap<OutKey, Vec<OutValue>> = HashMap::new();
+            for inbound in rx {
+                let (key, value) = inbound;
+                by_key.entry(key).or_insert_with(Vec::new).push(value)
+            }
 
-                // now that we have them all grouped by key, we can run the reducer on the groups
-                for (key, values) in by_key.into_iter() {
-                    let output = func(key, values);
-                    tx.send(output);
-                }
-            },
-            buffsize,
-        )
+            // now that we have them all grouped by key, we can run the reducer on the groups
+            for (key, values) in by_key.into_iter() {
+                let output = func(key, values);
+                tx.send(output);
+            }
+        })
     }
 }
 
@@ -451,7 +458,7 @@ mod multiplex {
     use std::thread;
     use std::sync::mpsc;
 
-    use super::{PipelineEntry, Sender};
+    use super::{PipelineConfig, PipelineEntry, Sender};
 
     /// A meta pipeline entry that distributes the work of a `PipelineEntry`
     /// across multiple threads
@@ -461,7 +468,6 @@ mod multiplex {
         Entry: PipelineEntry<In, Out> + Send,
     {
         entries: Vec<Entry>,
-        buffsize: usize,
 
         // make the compiler happy
         in_: PhantomData<In>,
@@ -477,8 +483,8 @@ mod multiplex {
     where
         Entry: PipelineEntry<In, Out> + Send + Copy,
     {
-        pub fn from(entry: Entry, workers: usize, buffsize: usize) -> Self {
-            Self::new((0..workers).map(|_| entry).collect(), buffsize)
+        pub fn from(entry: Entry, workers: usize) -> Self {
+            Self::new((0..workers).map(|_| entry).collect())
         }
     }
 
@@ -486,10 +492,9 @@ mod multiplex {
     where
         Entry: PipelineEntry<In, Out> + Send,
     {
-        pub fn new(entries: Vec<Entry>, buffsize: usize) -> Self {
+        pub fn new(entries: Vec<Entry>) -> Self {
             Multiplex {
                 entries,
-                buffsize,
                 in_: PhantomData,
                 out_: PhantomData,
             }
@@ -519,9 +524,13 @@ mod multiplex {
                 return entry.process(rx, tx);
             }
 
+            // TODO both of these methods use PipelineConfig::default() to size their internal
+            // channel buffers are aren't able to customise them
+
             if cfg!(feature = "chan") {
                 // if we're compiled when `chan` support, use that
-                let (chan_tx, chan_rx) = chan::sync(self.buffsize);
+                let (chan_tx, chan_rx) =
+                    chan::sync(PipelineConfig::default().buff_size);
 
                 for entry in self.entries {
                     let entry_rx = chan_rx.clone();
@@ -539,8 +548,9 @@ mod multiplex {
                 // if we weren't compiled with `chan` use a Mutex<rx>. workers
                 // will read their work out of this channel but send their
                 // results directly into the regular tx channel
-                let (master_tx, chan_rx) = mpsc::sync_channel(self.buffsize);
-                let master_tx = Sender::new(master_tx);
+
+                let (master_tx, chan_rx) =
+                    Sender::new(PipelineConfig::default());
                 let chan_rx = LockedRx::new(chan_rx);
 
                 for entry in self.entries {
@@ -615,9 +625,8 @@ mod tests {
 
     #[test]
     fn simple() {
-        let buffsize: usize = 10;
         let source: Vec<i32> = vec![1, 2, 3];
-        let pbb: Pipeline<i32> = Pipeline::from(source, buffsize);
+        let pbb: Pipeline<i32> = Pipeline::from(source);
         let produced: Vec<i32> = pbb.into_iter().collect();
 
         assert_eq!(produced, vec![1, 2, 3]);
@@ -625,13 +634,10 @@ mod tests {
 
     #[test]
     fn map() {
-        let buffsize: usize = 10;
-
         let source: Vec<i32> = (1..1000).collect();
         let expect: Vec<i32> = source.iter().map(|x| x * 2).collect();
 
-        let pbb: Pipeline<i32> =
-            Pipeline::from(source, buffsize).map(|i| i * 2, buffsize);
+        let pbb: Pipeline<i32> = Pipeline::from(source).map(|i| i * 2);
         let produced: Vec<i32> = pbb.into_iter().collect();
 
         assert_eq!(produced, expect);
@@ -639,14 +645,12 @@ mod tests {
 
     #[test]
     fn multiple_map() {
-        let buffsize: usize = 10;
         let source: Vec<i32> = vec![1, 2, 3];
         let expect: Vec<i32> =
             source.iter().map(|x| (x * 2) * (x * 2)).collect();
 
-        let pbb: Pipeline<i32> = Pipeline::from(source, buffsize)
-            .map(|i| i * 2, buffsize)
-            .map(|i| i * i, buffsize);
+        let pbb: Pipeline<i32> =
+            Pipeline::from(source).map(|i| i * 2).map(|i| i * i);
         let produced: Vec<i32> = pbb.into_iter().collect();
 
         assert_eq!(produced, expect);
@@ -672,20 +676,14 @@ mod tests {
         // pointer and one that can take a closure. This is the function pointer
         // side
 
-        let buffsize: usize = 10;
         let workers: usize = 10;
 
         let source: Vec<u64> = (1..1000).collect();
         let expect: Vec<u64> =
             source.clone().into_iter().map(fib_work).collect();
 
-        let pbb: Pipeline<u64> = Pipeline::from(source, buffsize).then(
-            multiplex::Multiplex::from(
-                map::Mapper::new(fib_work),
-                workers,
-                buffsize,
-            ),
-            buffsize,
+        let pbb: Pipeline<u64> = Pipeline::from(source).then(
+            multiplex::Multiplex::from(map::Mapper::new(fib_work), workers),
         );
         let mut produced: Vec<u64> = pbb.into_iter().collect();
 
@@ -695,19 +693,15 @@ mod tests {
 
     #[test]
     fn multiplex_map_closure() {
-        let buffsize: usize = 10;
         let workers: usize = 10;
 
         let source: Vec<i32> = (1..1000).collect();
         let expect: Vec<i32> = source.iter().map(|x| x * 2).collect();
 
-        let pbb: Pipeline<i32> = Pipeline::from(source, buffsize).then(
-            multiplex::Multiplex::new(
+        let pbb: Pipeline<i32> =
+            Pipeline::from(source).then(multiplex::Multiplex::new(
                 (0..workers).map(|_| map::Mapper::new(|i| i * 2)).collect(),
-                buffsize,
-            ),
-            buffsize,
-        );
+            ));
         let mut produced: Vec<i32> = pbb.into_iter().collect();
 
         produced.sort(); // these may arrive out of order
@@ -716,8 +710,6 @@ mod tests {
 
     #[test]
     fn filter() {
-        let buffsize: usize = 10;
-
         let source: Vec<i32> = (1..1000).collect();
         let expect: Vec<i32> = source
             .iter()
@@ -725,9 +717,8 @@ mod tests {
             .filter(|x| x % 2 == 0)
             .collect();
 
-        let pbb: Pipeline<i32> = Pipeline::from(source, buffsize)
-            .map(|i| i + 1, buffsize)
-            .filter(|i| i % 2 == 0, buffsize);
+        let pbb: Pipeline<i32> =
+            Pipeline::from(source).map(|i| i + 1).filter(|i| i % 2 == 0);
         let produced: Vec<i32> = pbb.into_iter().collect();
 
         assert_eq!(produced, expect);
@@ -735,8 +726,6 @@ mod tests {
 
     #[test]
     fn simple_closure() {
-        let buffsize: usize = 10;
-
         let source: Vec<i32> = (1..1000).collect();
         let expect: Vec<i32> = source
             .iter()
@@ -744,17 +733,14 @@ mod tests {
             .filter(|x| x % 2 == 0)
             .collect();
 
-        let pbb: Pipeline<i32> = Pipeline::from(source, buffsize).pipe(
-            |in_, out| {
-                for item in in_ {
-                    let item = item + 1;
-                    if item % 2 == 0 {
-                        out.send(item);
-                    }
+        let pbb: Pipeline<i32> = Pipeline::from(source).pipe(|in_, out| {
+            for item in in_ {
+                let item = item + 1;
+                if item % 2 == 0 {
+                    out.send(item);
                 }
-            },
-            10,
-        );
+            }
+        });
         let produced: Vec<i32> = pbb.into_iter().collect();
 
         assert_eq!(produced, expect);

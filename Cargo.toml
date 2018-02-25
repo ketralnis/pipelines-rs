@@ -6,7 +6,7 @@ license = "BSD-2-Clause"
 description = "A tool for constructing multi-threaded pipelines of execution"
 repository = "https://github.com/ketralnis/pipelines-rs"
 readme = "README.md"
-keywords = ["pipeline", "pipelines", "parallel", "concurrent"]
+keywords = ["pipeline", "pipelines", "parallel", "concurrent", "mapreduce"]
 
 [features]
 default = ["chan"]

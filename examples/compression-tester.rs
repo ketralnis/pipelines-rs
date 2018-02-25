@@ -23,15 +23,12 @@ use humansize::{file_size_opts, FileSize};
 use pipelines::{Mapper, Multiplex, Pipeline};
 
 fn main() {
-    // we could have this many whole files' contents in memory at once
-    const BUFFSIZE: usize = 10;
-
     // how many threads to use for compression
     let workers = num_cpus::get();
 
     let args: Vec<OsString> = env::args_os().skip(1).collect();
 
-    let pl = Pipeline::from(args, 0)
+    let pl = Pipeline::from(args)
         .pipe(|args, out| {
             // walk all of the directories we were passed
             for arg in args {
@@ -48,7 +45,7 @@ fn main() {
                     }
                 }
             }
-        }, BUFFSIZE)
+        })
         .map(|(fname, file_len)| {
             // open up each file and read out the data. it's probably only
             // useful to have one of these going at a time if the files are all
@@ -58,12 +55,12 @@ fn main() {
             file.read_to_end(&mut data).expect("couldn't read");
             debug!("Read {:?}: {} bytes", fname, data.len());
             data
-        }, BUFFSIZE)
+        })
         // but we can do the compression in parallel
         .then(Multiplex::from(Mapper::new(try_compress),
                               workers,
-                              BUFFSIZE),
-              BUFFSIZE);
+                              ),
+              );
 
     let mut total_old_size: usize = 0;
     let mut total_new_size: usize = 0;
