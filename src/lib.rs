@@ -62,7 +62,6 @@ where
     Output: Send,
 {
     /// Start a pipeline from an IntoIterator
-    #[must_use]
     pub fn from<I>(source: I, buffsize: usize) -> Pipeline<Output>
     where
         I: IntoIterator<Item = Output> + Send + 'static,
@@ -92,7 +91,6 @@ where
     ///     }
     /// }, buffsize);
     /// ```
-    #[must_use]
     pub fn new<F>(func: F, buffsize: usize) -> Self
     where
         F: FnOnce(mpsc::SyncSender<Output>) -> () + Send + 'static,
@@ -120,7 +118,6 @@ where
     ///     .map(|x| x*2, buffsize)
     ///     .into_iter().collect();
     /// ```
-    #[must_use]
     pub fn then<EntryOut, Entry>(
         self,
         next: Entry,
@@ -288,7 +285,7 @@ where
                 // now that we have them all grouped by key, we can run the reducer on the groups
                 for (key, values) in by_key.into_iter() {
                     let output = func(key, values);
-                    tx.send(output);
+                    tx.send(output).expect("failed to send")
                 }
             },
             buffsize,
@@ -303,7 +300,6 @@ where
     type Item = Output;
     type IntoIter = mpsc::IntoIter<Output>;
 
-    #[must_use]
     fn into_iter(self) -> mpsc::IntoIter<Output> {
         self.rx.into_iter()
     }
