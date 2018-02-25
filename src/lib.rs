@@ -42,9 +42,11 @@
 
 use std::sync::mpsc;
 use std::thread;
+use std::hash::Hash;
+use std::collections::HashMap;
 
-pub use map::Mapper;
 pub use filter::Filter;
+pub use map::Mapper;
 pub use multiplex::Multiplex;
 
 #[derive(Debug)]
@@ -223,7 +225,7 @@ where
 
     /// Consume this Pipeline without collecting the results
     ///
-    /// Can be useful if the work was done in a the last `PipelineEntry`
+    /// Can be useful if the work was done in the last `PipelineEntry`
     ///
     /// # Example
     ///
@@ -237,6 +239,60 @@ where
     /// ```
     pub fn drain(self) {
         for _ in self {}
+    }
+}
+
+impl<OutKey, OutValue> Pipeline<(OutKey, OutValue)>
+where
+    OutKey: Hash + Eq + Send,
+    OutValue: Send,
+{
+    /// The reduce phase of a mapreduce-type pipeline.
+    ///
+    /// The previous entry must have sent tuples of (Key, Value), and this entry
+    /// groups them by Key and calls func once per Key with each Value
+    ///
+    /// # Example
+    ///
+    ///
+    /// ```rust
+    /// use pipelines::Pipeline;
+    /// let nums: Vec<u64> = (0..10).collect();
+    /// let buffsize = 5;
+    ///
+    /// // find the sum of the even/odd numbers in the doubles of 0..10
+    /// let biggests: Vec<(bool, u64)> = Pipeline::from(nums, buffsize)
+    ///     .map(|x| (x % 2 == 0, x*2), buffsize)
+    ///     .reduce(|evenness, nums| (evenness, *nums.iter().max().unwrap()),
+    ///             buffsize)
+    ///     .into_iter().collect();
+    /// ```
+    pub fn reduce<EntryOut, Func>(
+        self,
+        func: Func,
+        buffsize: usize,
+    ) -> Pipeline<EntryOut>
+    where
+        Func: Fn(OutKey, Vec<OutValue>) -> EntryOut + Send + 'static,
+        EntryOut: Send,
+    {
+        self.pipe(
+            move |rx, tx| {
+                // gather up all of the values and group them by key
+                let mut by_key: HashMap<OutKey, Vec<OutValue>> = HashMap::new();
+                for inbound in rx {
+                    let (key, value) = inbound;
+                    by_key.entry(key).or_insert_with(Vec::new).push(value)
+                }
+
+                // now that we have them all grouped by key, we can run the reducer on the groups
+                for (key, values) in by_key.into_iter() {
+                    let output = func(key, values);
+                    tx.send(output);
+                }
+            },
+            buffsize,
+        )
     }
 }
 
@@ -269,7 +325,7 @@ mod map {
     use super::PipelineEntry;
 
     /// A pipeline entry representing a function to be run on each value and its
-    /// result to be send down the pipeline
+    /// result to be sent down the pipeline
     #[derive(Debug)]
     pub struct Mapper<In, Out, Func>
     where
