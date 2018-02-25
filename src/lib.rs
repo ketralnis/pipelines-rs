@@ -57,6 +57,30 @@ where
     rx: mpsc::Receiver<Output>,
 }
 
+#[derive(Debug)]
+pub struct Sender<Out> {
+    tx: mpsc::SyncSender<Out>,
+}
+
+impl<Out> Sender<Out> {
+    /// Transmit a value to the next state in the pipeline
+    ///
+    /// Panics on failure
+    pub fn send(&self, out: Out) -> () {
+        self.tx.send(out).expect("failed send");
+    }
+
+    fn new(tx: mpsc::SyncSender<Out>) -> Self {
+        Self { tx }
+    }
+}
+
+impl<Out> Clone for Sender<Out> {
+    fn clone(&self) -> Self {
+        Self::new(self.tx.clone())
+    }
+}
+
 impl<Output> Pipeline<Output>
 where
     Output: Send,
@@ -69,7 +93,7 @@ where
         Self::new(
             move |tx| {
                 for item in source {
-                    tx.send(item).expect("failed send")
+                    tx.send(item);
                 }
             },
             buffsize,
@@ -87,16 +111,16 @@ where
     /// let pl = Pipeline::new(|tx| {
     ///     let stdin = io::stdin();
     ///     for line in stdin.lock().lines() {
-    ///         tx.send(line.unwrap()).unwrap();
+    ///         tx.send(line.unwrap());
     ///     }
     /// }, buffsize);
     /// ```
     pub fn new<F>(func: F, buffsize: usize) -> Self
     where
-        F: FnOnce(mpsc::SyncSender<Output>) -> () + Send + 'static,
+        F: FnOnce(Sender<Output>) -> () + Send + 'static,
     {
         let (tx, rx) = mpsc::sync_channel(buffsize);
-        thread::spawn(move || func(tx));
+        thread::spawn(move || func(Sender::new(tx)));
         Pipeline { rx }
     }
 
@@ -147,7 +171,7 @@ where
     ///     .pipe(|dirs, out| {
     ///         for dir in dirs {
     ///             for path in fs::read_dir(dir).unwrap() {
-    ///                 out.send(path.unwrap().path()).unwrap()
+    ///                 out.send(path.unwrap().path());
     ///             }
     ///         }
     ///     }, buffsize)
@@ -159,13 +183,13 @@ where
         buffsize: usize,
     ) -> Pipeline<EntryOut>
     where
-        Func: FnOnce(mpsc::Receiver<Output>, mpsc::SyncSender<EntryOut>) -> (),
+        Func: FnOnce(mpsc::Receiver<Output>, Sender<EntryOut>) -> (),
         Func: Send + 'static,
         EntryOut: Send,
     {
         let (tx, rx) = mpsc::sync_channel(buffsize);
         thread::spawn(move || {
-            func(self.rx, tx);
+            func(self.rx, Sender::new(tx));
         });
 
         Pipeline { rx }
@@ -226,12 +250,13 @@ where
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// use pipeline::Pipeline;
-    /// use sys::fs;
+    /// ```rust
+    /// use pipelines::Pipeline;
+    /// let nums: Vec<u64> = (0..10).collect();
+    /// let buffsize = 5;
     ///
-    /// Pipeline::from(vec!["/tmp/file1", "/tmp/file2"], 1)
-    ///     .map(|fname| fs::remove_file(fname).unwrap())
+    /// Pipeline::from(nums, buffsize)
+    ///     .map(|fname| /* something with side-effects */ (), buffsize)
     ///     .drain(); // no results to pass on
     /// ```
     pub fn drain(self) {
@@ -247,7 +272,7 @@ where
     /// The reduce phase of a mapreduce-type pipeline.
     ///
     /// The previous entry must have sent tuples of (Key, Value), and this entry
-    /// groups them by Key and calls func once per Key with each Value
+    /// groups them by Key and calls func once per Key
     ///
     /// # Example
     ///
@@ -285,7 +310,7 @@ where
                 // now that we have them all grouped by key, we can run the reducer on the groups
                 for (key, values) in by_key.into_iter() {
                     let output = func(key, values);
-                    tx.send(output).expect("failed to send")
+                    tx.send(output);
                 }
             },
             buffsize,
@@ -307,18 +332,13 @@ where
 
 /// The trait that entries in the pipeline must implement
 pub trait PipelineEntry<In, Out> {
-    fn process<I: IntoIterator<Item = In>>(
-        self,
-        rx: I,
-        tx: mpsc::SyncSender<Out>,
-    ) -> ();
+    fn process<I: IntoIterator<Item = In>>(self, rx: I, tx: Sender<Out>) -> ();
 }
 
 mod map {
     use std::marker::PhantomData;
-    use std::sync::mpsc;
 
-    use super::PipelineEntry;
+    use super::{PipelineEntry, Sender};
 
     /// A pipeline entry representing a function to be run on each value and its
     /// result to be sent down the pipeline
@@ -352,14 +372,10 @@ mod map {
     where
         Func: Fn(In) -> Out,
     {
-        fn process<I: IntoIterator<Item = In>>(
-            self,
-            rx: I,
-            tx: mpsc::SyncSender<Out>,
-        ) {
+        fn process<I: IntoIterator<Item = In>>(self, rx: I, tx: Sender<Out>) {
             for item in rx {
                 let mapped = (self.func)(item);
-                tx.send(mapped).expect("failed to send");
+                tx.send(mapped);
             }
         }
     }
@@ -382,9 +398,8 @@ mod map {
 
 mod filter {
     use std::marker::PhantomData;
-    use std::sync::mpsc;
 
-    use super::PipelineEntry;
+    use super::{PipelineEntry, Sender};
 
     /// A pipeline entry with a predicate that values must beet to be sent
     /// further in the pipeline
@@ -416,14 +431,10 @@ mod filter {
     where
         Func: Fn(&In) -> bool,
     {
-        fn process<I: IntoIterator<Item = In>>(
-            self,
-            rx: I,
-            tx: mpsc::SyncSender<In>,
-        ) {
+        fn process<I: IntoIterator<Item = In>>(self, rx: I, tx: Sender<In>) {
             for item in rx {
                 if (self.func)(&item) {
-                    tx.send(item).expect("failed to send")
+                    tx.send(item);
                 }
             }
         }
@@ -436,11 +447,11 @@ mod multiplex {
     #![cfg_attr(feature = "cargo-clippy", allow(expl_impl_clone_on_copy))]
 
     use std::marker::PhantomData;
-    use std::sync::mpsc;
     use std::sync::{Arc, Mutex};
     use std::thread;
+    use std::sync::mpsc;
 
-    use super::PipelineEntry;
+    use super::{PipelineEntry, Sender};
 
     /// A meta pipeline entry that distributes the work of a `PipelineEntry`
     /// across multiple threads
@@ -497,7 +508,7 @@ mod multiplex {
         fn process<I: IntoIterator<Item = In>>(
             mut self,
             rx: I,
-            tx: mpsc::SyncSender<Out>,
+            tx: Sender<Out>,
         ) {
             if self.entries.len() == 1 {
                 // if there's only one entry we can skip most of the work.
@@ -529,6 +540,7 @@ mod multiplex {
                 // will read their work out of this channel but send their
                 // results directly into the regular tx channel
                 let (master_tx, chan_rx) = mpsc::sync_channel(self.buffsize);
+                let master_tx = Sender::new(master_tx);
                 let chan_rx = LockedRx::new(chan_rx);
 
                 for entry in self.entries {
@@ -544,7 +556,7 @@ mod multiplex {
                 // workers will be putting their results into tx directly so
                 // this is the only shuffling around that we have to do
                 for item in rx {
-                    master_tx.send(item).expect("failed subsend");
+                    master_tx.send(item);
                 }
             }
         }
@@ -737,7 +749,7 @@ mod tests {
                 for item in in_ {
                     let item = item + 1;
                     if item % 2 == 0 {
-                        out.send(item).expect("failed to send")
+                        out.send(item);
                     }
                 }
             },

@@ -1,10 +1,10 @@
+extern crate env_logger;
+extern crate flate2;
+extern crate humansize;
 /// A `pipelines` example to see how much space could be saved in a directory
 /// with compression
 #[macro_use]
 extern crate log;
-extern crate env_logger;
-extern crate flate2;
-extern crate humansize;
 extern crate num_cpus;
 extern crate walkdir;
 
@@ -18,9 +18,9 @@ use std::io::Read;
 
 use flate2::Compression;
 use flate2::read::ZlibEncoder;
-use humansize::{FileSize, file_size_opts};
+use humansize::{file_size_opts, FileSize};
 
-use pipelines::{Pipeline, Mapper, Multiplex};
+use pipelines::{Mapper, Multiplex, Pipeline};
 
 fn main() {
     // we could have this many whole files' contents in memory at once
@@ -41,12 +41,10 @@ fn main() {
                     .filter(|e| e.file_type().is_file());
                 for entry in entries {
                     debug!("Walked into {:?}", entry);
-                    // let entry = entry.expect("bad entry");
                     let metadata = entry.metadata().expect("bad stat");
                     let len = metadata.len();
                     if len > 0 {
-                        out.send((entry.path().to_owned(), len))
-                            .expect("bad send");
+                        out.send((entry.path().to_owned(), len));
                     }
                 }
             }

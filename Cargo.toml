@@ -1,6 +1,6 @@
 [package]
 name = "pipelines"
-version = "0.2.0"
+version = "0.3.0"
 authors = ["David King <dking@ketralnis.com>"]
 license = "BSD-2-Clause"
 description = "A tool for constructing multi-threaded pipelines of execution"
