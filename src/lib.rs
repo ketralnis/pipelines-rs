@@ -47,7 +47,6 @@ pub use map::Mapper;
 pub use filter::Filter;
 pub use multiplex::Multiplex;
 
-
 #[derive(Debug)]
 pub struct Pipeline<Output>
 where
@@ -55,7 +54,6 @@ where
 {
     rx: mpsc::Receiver<Output>,
 }
-
 
 impl<Output> Pipeline<Output>
 where
@@ -68,8 +66,10 @@ where
         I: IntoIterator<Item = Output> + Send + 'static,
     {
         Self::new(
-            move |tx| for item in source {
-                tx.send(item).expect("failed send")
+            move |tx| {
+                for item in source {
+                    tx.send(item).expect("failed send")
+                }
             },
             buffsize,
         )
@@ -93,7 +93,7 @@ where
     #[must_use]
     pub fn new<F>(func: F, buffsize: usize) -> Self
     where
-        F: FnOnce(mpsc::SyncSender<Output>) -> () + Send + 'static
+        F: FnOnce(mpsc::SyncSender<Output>) -> () + Send + 'static,
     {
         let (tx, rx) = mpsc::sync_channel(buffsize);
         thread::spawn(move || func(tx));
@@ -165,7 +165,9 @@ where
         EntryOut: Send,
     {
         let (tx, rx) = mpsc::sync_channel(buffsize);
-        thread::spawn(move || { func(self.rx, tx); });
+        thread::spawn(move || {
+            func(self.rx, tx);
+        });
 
         Pipeline { rx }
     }
@@ -238,7 +240,6 @@ where
     }
 }
 
-
 impl<Output> IntoIterator for Pipeline<Output>
 where
     Output: Send,
@@ -252,7 +253,6 @@ where
     }
 }
 
-
 /// The trait that entries in the pipeline must implement
 pub trait PipelineEntry<In, Out> {
     fn process<I: IntoIterator<Item = In>>(
@@ -261,7 +261,6 @@ pub trait PipelineEntry<In, Out> {
         tx: mpsc::SyncSender<Out>,
     ) -> ();
 }
-
 
 mod map {
     use std::marker::PhantomData;
@@ -329,7 +328,6 @@ mod map {
     }
 }
 
-
 mod filter {
     use std::marker::PhantomData;
     use std::sync::mpsc;
@@ -380,11 +378,10 @@ mod filter {
     }
 }
 
-
 mod multiplex {
     // work around https://github.com/rust-lang/rust/issues/28229
     // (functions implement Copy but not Clone)
-    #![cfg_attr(feature="cargo-clippy", allow(expl_impl_clone_on_copy))]
+    #![cfg_attr(feature = "cargo-clippy", allow(expl_impl_clone_on_copy))]
 
     use std::marker::PhantomData;
     use std::sync::mpsc;
@@ -467,15 +464,14 @@ mod multiplex {
                     let entry_rx = chan_rx.clone();
                     let entry_tx = tx.clone();
 
-                    thread::spawn(
-                        move || { entry.process(entry_rx, entry_tx); },
-                    );
+                    thread::spawn(move || {
+                        entry.process(entry_rx, entry_tx);
+                    });
                 }
 
                 for item in rx {
                     chan_tx.send(item);
                 }
-
             } else {
                 // if we weren't compiled with `chan` use a Mutex<rx>. workers
                 // will read their work out of this channel but send their
@@ -487,9 +483,9 @@ mod multiplex {
                     let entry_rx = chan_rx.clone();
                     let entry_tx = tx.clone();
 
-                    thread::spawn(
-                        move || { entry.process(entry_rx, entry_tx); },
-                    );
+                    thread::spawn(move || {
+                        entry.process(entry_rx, entry_tx);
+                    });
                 }
 
                 // now we copy the work from rx into the shared channel. the
@@ -514,7 +510,9 @@ mod multiplex {
         T: Send,
     {
         pub fn new(recv: mpsc::Receiver<T>) -> Self {
-            Self { lockbox: Arc::new(Mutex::new(recv)) }
+            Self {
+                lockbox: Arc::new(Mutex::new(recv)),
+            }
         }
     }
 
@@ -523,7 +521,9 @@ mod multiplex {
         T: Send,
     {
         fn clone(&self) -> Self {
-            Self { lockbox: self.lockbox.clone() }
+            Self {
+                lockbox: self.lockbox.clone(),
+            }
         }
     }
 
@@ -544,7 +544,6 @@ mod multiplex {
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -567,8 +566,8 @@ mod tests {
         let source: Vec<i32> = (1..1000).collect();
         let expect: Vec<i32> = source.iter().map(|x| x * 2).collect();
 
-        let pbb: Pipeline<i32> = Pipeline::from(source, buffsize)
-            .map(|i| i * 2, buffsize);
+        let pbb: Pipeline<i32> =
+            Pipeline::from(source, buffsize).map(|i| i * 2, buffsize);
         let produced: Vec<i32> = pbb.into_iter().collect();
 
         assert_eq!(produced, expect);
@@ -606,7 +605,7 @@ mod tests {
     #[test]
     fn multiplex_map_function() {
         // we have two signatures for Multiplex, one that takes a function
-        // pointer and one that can take a closure. THis is the function pointer
+        // pointer and one that can take a closure. This is the function pointer
         // side
 
         let buffsize: usize = 10;
@@ -682,10 +681,12 @@ mod tests {
             .collect();
 
         let pbb: Pipeline<i32> = Pipeline::from(source, buffsize).pipe(
-            |in_, out| for item in in_ {
-                let item = item + 1;
-                if item % 2 == 0 {
-                    out.send(item).expect("failed to send")
+            |in_, out| {
+                for item in in_ {
+                    let item = item + 1;
+                    if item % 2 == 0 {
+                        out.send(item).expect("failed to send")
+                    }
                 }
             },
             10,
