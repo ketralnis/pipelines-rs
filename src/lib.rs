@@ -1,10 +1,9 @@
 //! A tool for constructing multi-threaded pipelines of execution
 //!
-//! A `Pipeline` consists in one or more `PipelineEntry`s that each runs in its
-//! own thread (or multiple threads in the case of `Multiplex`). They take in
-//! items from the previous entry and produce items for the next entry, similar
-//! to a Unix pipeline. This allows for expressing computation as a series of
-//! steps that feed into each other and run concurrently
+//! A `Pipeline` consists in one or more stages that each runs in its own thread (or multiple
+//! threads). They take in items from the previous stage and produce items for the next stage,
+//! similar to a Unix pipeline. This allows for expressing computation as a series of steps that
+//! feed into each other and run concurrently
 //!
 //! # Examples
 //!
@@ -24,29 +23,53 @@
 //! Build the first 10 fibonacci numbers in parallel, then double them:
 //!
 //! ```rust
-//! use pipelines::{Pipeline, Mapper, Multiplex};
+//! use pipelines::Pipeline;
 //!
 //! let workers = 2;
 //! fn fibonacci(n:u64)->u64{if n<2 {1} else {fibonacci(n-1) + fibonacci(n-2)}}
 //!
 //! let nums: Vec<u64> = (0..10).collect();
 //! let fibs: Vec<u64> = Pipeline::from(nums)
-//!     .then(Multiplex::from(Mapper::new(fibonacci), workers))
+//!     .pmap(workers, fibonacci)
 //!     .map(|x| x*2)
+//!     .into_iter().collect();
+//! ```
+//!
+//! Build the first 10 fibonacci numbers in parallel then group them by evenness, expressed in
+//! mapreduce stages
+//!
+//! ```rust
+//! use pipelines::Pipeline;
+//!
+//! let workers = 2;
+//! fn fibonacci(n:u64)->u64{if n<2 {1} else {fibonacci(n-1) + fibonacci(n-2)}}
+//!
+//! let nums: Vec<u64> = (0..10).collect();
+//! let fibs: Vec<(bool, u64)> = Pipeline::from(nums)
+//!     .pmap(workers, fibonacci)
+//!     .map(|num| (num % 2 == 0, num))
+//!     .preduce(workers, |evenness, nums| (evenness, *nums.iter().max().unwrap()))
 //!     .into_iter().collect();
 //! ```
 
 // HEADUPS: Keep that ^^ in sync with README.md
 
+#[cfg(feature = "chan")]
+extern crate chan;
+
+use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::Hash;
+use std::hash::Hasher;
+use std::sync::{Arc, Mutex};
 use std::sync::mpsc;
 use std::thread;
-use std::hash::Hash;
-use std::collections::HashMap;
 
 pub use filter::Filter;
 pub use map::Mapper;
 pub use multiplex::Multiplex;
 
+/// Passed to pipelines as their place to send results
 #[derive(Debug)]
 pub struct Sender<Out> {
     tx: mpsc::SyncSender<Out>,
@@ -76,12 +99,18 @@ impl<Out> Clone for Sender<Out> {
     }
 }
 
+/// Passed to pipelines as their place to get incoming data from the previous stage.
+///
+/// It's possible to use by calling `recv` directly, but is primarily for its `into_iter`
 #[derive(Debug)]
 pub struct Receiver<In> {
     rx: mpsc::Receiver<In>,
 }
 
 impl<In> Receiver<In> {
+    /// Get an item from the previous stage
+    ///
+    /// returns None if the remote side has hung up and all data has been received
     pub fn recv(&mut self) -> Option<In> {
         match self.rx.recv() {
             Ok(val) => Some(val),
@@ -116,6 +145,22 @@ impl<In> Iterator for ReceiverIntoIterator<In> {
     }
 }
 
+/// Configuration for buffers internal to the Pipeline
+///
+/// Each stage inherits the configuration from its previous state. As a result, this configures
+/// future stages, not past
+///
+/// # Example
+///
+/// ```rust
+/// use pipelines::{Pipeline, PipelineConfig};
+///
+/// let nums: Vec<u64> = (0..10).collect();
+/// let fibs: Vec<u64> = Pipeline::from(nums)
+///     .configure(PipelineConfig::default().buff_size(10))
+///     .map(|x| x*2) // *this* stage has its send buffer set to 10
+///     .into_iter().collect();
+/// ```
 #[derive(Debug, Copy, Clone)]
 pub struct PipelineConfig {
     buff_size: usize,
@@ -152,7 +197,7 @@ where
 {
     /// Start a Pipeline
     ///
-    /// # Examples
+    /// # Example
     ///
     /// ```rust
     /// use std::io::{self, BufRead};
@@ -175,6 +220,13 @@ where
     }
 
     /// Start a pipeline from an IntoIterator
+    ///
+    /// Example:
+    ///
+    /// use std::io::{self, BufRead};
+    /// use pipelines::Pipeline;
+    /// let pl = Pipeline::new((0..100))
+    ///     .map(|x| x*2);
     pub fn from<I>(source: I) -> Pipeline<Output>
     where
         I: IntoIterator<Item = Output> + Send + 'static,
@@ -188,7 +240,8 @@ where
 
     /// Change the configuration of the pipeline
     ///
-    /// Note that this applies to stages occurring *after* the config, not before.
+    /// Note that this applies to stages occurring *after* the config, not before. See
+    /// `PipelineConfig`
     pub fn configure(self, config: PipelineConfig) -> Self {
         Pipeline {
             rx: self.rx,
@@ -196,10 +249,9 @@ where
         }
     }
 
-    /// Given another `PipelineEntry` `next`, send the results of the previous
-    /// entry into it
+    /// Given a `PipelineEntry` `next`, send the results of the previous entry into it
     ///
-    /// # Examples
+    /// # Example
     ///
     /// ```rust
     /// use pipelines::{Pipeline, Multiplex, Mapper};
@@ -245,8 +297,7 @@ where
     /// ```
     pub fn pipe<EntryOut, Func>(self, func: Func) -> Pipeline<EntryOut>
     where
-        Func: FnOnce(Receiver<Output>, Sender<EntryOut>) -> (),
-        Func: Send + 'static,
+        Func: FnOnce(Receiver<Output>, Sender<EntryOut>) -> () + Send + 'static,
         EntryOut: Send,
     {
         let config = self.config.clone();
@@ -277,10 +328,63 @@ where
         Func: Fn(Output) -> EntryOut + Send + 'static,
         EntryOut: Send,
     {
-        self.then(map::Mapper::new(func))
+        self.pipe(move |rx, tx| {
+            for entry in rx {
+                tx.send(func(entry));
+            }
+        })
     }
 
-    /// Pass items into the next `PipelineEntry` only if `pred` is true
+    /// Call `func` on every entry in the pipeline using multiple worker threads
+    ///
+    /// # Example
+    ///
+    /// Double every number
+    ///
+    /// ```rust
+    /// use pipelines::Pipeline;
+    /// let nums: Vec<u64> = (0..10).collect();
+    ///
+    /// let doubled: Vec<u64> = Pipeline::from(nums)
+    ///     .pmap(2, |x| x*2)
+    ///     .into_iter().collect();
+    /// ```
+    pub fn pmap<EntryOut, Func>(
+        self,
+        workers: usize,
+        func: Func,
+    ) -> Pipeline<EntryOut>
+    where
+        Func: Fn(Output) -> EntryOut + Send + Sync + 'static,
+        EntryOut: Send,
+    {
+        self.pipe(move |rx, tx| {
+            let (master_tx, chan_rx) = Sender::pair(PipelineConfig::default());
+            let chan_rx = LockedRx::new(chan_rx);
+            let func = Arc::new(func);
+
+            for _ in 0..workers {
+                let entry_rx = chan_rx.clone();
+                let entry_tx = tx.clone();
+                let func = func.clone();
+
+                thread::spawn(move || {
+                    for x in entry_rx {
+                        entry_tx.send(func(x));
+                    }
+                });
+            }
+
+            // now we copy the work from rx into the shared channel. the
+            // workers will be putting their results into tx directly so
+            // this is the only shuffling around that we have to do
+            for item in rx {
+                master_tx.send(item);
+            }
+        })
+    }
+
+    /// Pass items into the next stage only if `pred` is true
     ///
     /// # Example
     ///
@@ -298,12 +402,18 @@ where
     where
         Func: Fn(&Output) -> bool + Send + 'static,
     {
-        self.then(filter::Filter::new(pred))
+        self.pipe(move |rx, tx| {
+            for entry in rx {
+                if pred(&entry) {
+                    tx.send(entry);
+                }
+            }
+        })
     }
 
     /// Consume this Pipeline without collecting the results
     ///
-    /// Can be useful if the work was done in the last `PipelineEntry`
+    /// Can be useful if the work was done in the final stage
     ///
     /// # Example
     ///
@@ -320,6 +430,7 @@ where
     }
 }
 
+// We can implement reduce/preduce only if entries are (key, value) tuples with a hashable key
 impl<OutKey, OutValue> Pipeline<(OutKey, OutValue)>
 where
     OutKey: Hash + Eq + Send,
@@ -351,8 +462,7 @@ where
         self.pipe(move |rx, tx| {
             // gather up all of the values and group them by key
             let mut by_key: HashMap<OutKey, Vec<OutValue>> = HashMap::new();
-            for inbound in rx {
-                let (key, value) = inbound;
+            for (key, value) in rx {
                 by_key.entry(key).or_insert_with(Vec::new).push(value)
             }
 
@@ -361,6 +471,84 @@ where
                 let output = func(key, values);
                 tx.send(output);
             }
+        })
+    }
+
+    /// Like `reduce` but called with multiple reducer threads
+    ///
+    /// All instances of the same Key are sent to the same thread (to guarantee mapreduce
+    /// semantics)
+    ///
+    /// # Example
+    ///
+    /// Double every number
+    ///
+    /// ```rust
+    /// use pipelines::Pipeline;
+    /// let nums: Vec<u64> = (0..10).collect();
+    ///
+    /// let biggests: Vec<(bool, u64)> = Pipeline::from(nums)
+    ///     .map(|x| (x % 2 == 0, x*2))
+    ///     .preduce(2, |evenness, nums| (evenness, *nums.iter().max().unwrap()))
+    ///     .into_iter().collect();
+    /// ```
+    pub fn preduce<EntryOut, Func>(
+        self,
+        workers: usize,
+        func: Func,
+    ) -> Pipeline<EntryOut>
+    where
+        Func: Fn(OutKey, Vec<OutValue>) -> EntryOut + Send + Sync + 'static,
+        OutKey: Send,
+        OutValue: Send,
+        EntryOut: Send,
+    {
+        let func = Arc::new(func);
+        let pl_config = self.config.clone();
+
+        self.pipe(move |rx, tx| {
+            // build up the reducer threads
+            let mut txs = Vec::with_capacity(workers);
+            for _ in 0..workers {
+                let func = func.clone();
+                // let pl_config = self.config.clone();
+                // each thread receives data on an rx that we make for it
+                let (entry_tx, entry_rx) = Sender::pair(pl_config);
+                // but they send their data directly into the next stage
+                let tx = tx.clone();
+
+                thread::spawn(move || {
+                    let mut hm = HashMap::new();
+                    for (k, v) in entry_rx {
+                        hm.entry(k).or_insert_with(Vec::new).push(v);
+                    }
+
+                    for (k, vs) in hm.drain() {
+                        tx.send(func(k, vs));
+                    }
+                });
+
+                txs.push(entry_tx);
+            }
+
+            // now iterate through the messages sent into the master reducer thread (us)
+            for (key, value) in rx {
+                let mut hasher = DefaultHasher::new();
+                key.hash(&mut hasher);
+                let which = (hasher.finish() as usize) % workers;
+
+                // because we send synchronously like this, we may block if this thread's buffer
+                // doesn't have room for this message which may happen if a reducer can't keep up,
+                // even if another reducer may have buffer space. (We can't send it to any other
+                // thread because a reducer thread must see all instances of a given key).  But
+                // during this phase the reducers haven't actually started doing any work yet, so
+                // any blocking they do will probably be just due to hashmap/vector reallocation.
+                txs[which].send((key, value));
+            }
+
+            // now every thread has received every message and should be starting doing their
+            // actual reducer phase. They send their data directly into the final tx so our work
+            // here is done
         })
     }
 }
@@ -377,7 +565,7 @@ where
     }
 }
 
-/// The trait that entries in the pipeline must implement
+/// A trait for structs that may be used as `Pipeline` entries
 pub trait PipelineEntry<In, Out> {
     fn process<I: IntoIterator<Item = In>>(self, rx: I, tx: Sender<Out>) -> ();
 }
@@ -490,14 +678,17 @@ mod filter {
 
 mod multiplex {
     // work around https://github.com/rust-lang/rust/issues/28229
-    // (functions implement Copy but not Clone)
+    // (functions implement Copy but not Clone). This is only necessary for the older-style
+    // Multiplex
     #![cfg_attr(feature = "cargo-clippy", allow(expl_impl_clone_on_copy))]
 
     use std::marker::PhantomData;
-    use std::sync::{Arc, Mutex};
     use std::thread;
 
-    use super::{PipelineConfig, PipelineEntry, Receiver, Sender};
+    #[cfg(feature = "chan")]
+    use chan;
+
+    use super::{LockedRx, PipelineConfig, PipelineEntry, Sender};
 
     /// A meta pipeline entry that distributes the work of a `PipelineEntry`
     /// across multiple threads
@@ -540,9 +731,6 @@ mod multiplex {
         }
     }
 
-    #[cfg(feature = "chan")]
-    extern crate chan;
-
     impl<In, Out, Entry> PipelineEntry<In, Out> for Multiplex<In, Out, Entry>
     where
         Entry: PipelineEntry<In, Out> + Send + 'static,
@@ -564,7 +752,7 @@ mod multiplex {
             }
 
             // TODO both of these methods use PipelineConfig::default() to size their internal
-            // channel buffers are aren't able to customise them
+            // channel buffers and aren't able to customise them
 
             if cfg!(feature = "chan") {
                 // if we're compiled when `chan` support, use that
@@ -611,44 +799,46 @@ mod multiplex {
         }
     }
 
-    struct LockedRx<T>
-    where
-        T: Send,
-    {
-        lockbox: Arc<Mutex<Receiver<T>>>,
-    }
+}
 
-    impl<T> LockedRx<T>
-    where
-        T: Send,
-    {
-        pub fn new(recv: Receiver<T>) -> Self {
-            Self {
-                lockbox: Arc::new(Mutex::new(recv)),
-            }
+#[derive(Debug)]
+pub struct LockedRx<T>
+where
+    T: Send + 'static,
+{
+    lockbox: Arc<Mutex<Receiver<T>>>,
+}
+
+impl<T> LockedRx<T>
+where
+    T: Send,
+{
+    pub fn new(recv: Receiver<T>) -> Self {
+        Self {
+            lockbox: Arc::new(Mutex::new(recv)),
         }
     }
+}
 
-    impl<T> Clone for LockedRx<T>
-    where
-        T: Send,
-    {
-        fn clone(&self) -> Self {
-            Self {
-                lockbox: self.lockbox.clone(),
-            }
+impl<T> Clone for LockedRx<T>
+where
+    T: Send,
+{
+    fn clone(&self) -> Self {
+        Self {
+            lockbox: self.lockbox.clone(),
         }
     }
+}
 
-    impl<T> Iterator for LockedRx<T>
-    where
-        T: Send,
-    {
-        type Item = T;
+impl<T> Iterator for LockedRx<T>
+where
+    T: Send,
+{
+    type Item = T;
 
-        fn next(&mut self) -> Option<T> {
-            self.lockbox.lock().expect("failed unwrap mutex").recv()
-        }
+    fn next(&mut self) -> Option<T> {
+        self.lockbox.lock().expect("failed unwrap mutex").recv()
     }
 }
 
