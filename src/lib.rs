@@ -1025,4 +1025,36 @@ mod tests {
 
         assert_eq!(produced, expect);
     }
+
+    #[test]
+    fn mapreduce() {
+        let source: Vec<i32> = (1..1000).collect();
+        let workers: usize = 2;
+
+        let expect = vec![(false, 1996), (true, 1998)];
+
+        let mut produced: Vec<(bool, i32)> = Pipeline::from(source)
+            .pmap(workers, |x| x * 2)
+            .pmap(workers, |x| (x % 3 == 0, x))
+            .preduce(2, |threevenness, nums| {
+                (threevenness, *nums.iter().max().unwrap())
+            })
+            .into_iter()
+            .collect();
+        produced.sort();
+
+        assert_eq!(produced, expect);
+    }
+
+    #[test]
+    fn config() {
+        let source: Vec<i32> = (1..100).collect();
+        let _: Vec<i32> = Pipeline::from(source)
+            .configure(PipelineConfig::default().buff_size(10))
+            .map(|x| x * 2)
+            .configure(PipelineConfig::default().buff_size(10))
+            .filter(|x| x % 3 == 0)
+            .into_iter()
+            .collect();
+    }
 }
