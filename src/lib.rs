@@ -334,7 +334,7 @@ where
     /// let directories = vec!["/usr/bin", "/usr/local/bin"];
     ///
     /// let found_files: Vec<PathBuf> = Pipeline::from(directories)
-    ///     .pipe(|dirs, out| {
+    ///     .pipe(|out, dirs| {
     ///         for dir in dirs {
     ///             for path in fs::read_dir(dir).unwrap() {
     ///                 out.send(path.unwrap().path());
@@ -345,13 +345,13 @@ where
     /// ```
     pub fn pipe<EntryOut, Func>(self, func: Func) -> Pipeline<EntryOut>
     where
-        Func: FnOnce(Receiver<Output>, Sender<EntryOut>) -> () + Send + 'static,
+        Func: FnOnce(Sender<EntryOut>, Receiver<Output>) -> () + Send + 'static,
         EntryOut: Send,
     {
         let config = self.config.clone();
         let (tx, rx) = Sender::pair(config.clone());
         thread::spawn(move || {
-            func(self.rx, tx);
+            func(tx, self.rx);
         });
 
         Pipeline { rx, config: config }
@@ -370,7 +370,7 @@ where
     /// let directories = vec!["/usr/bin", "/usr/local/bin"];
     ///
     /// let found_files: Vec<PathBuf> = Pipeline::from(directories)
-    ///     .ppipe(5, |dirs, out| {
+    ///     .ppipe(5, |out, dirs| {
     ///         for dir in dirs {
     ///             for path in fs::read_dir(dir).unwrap() {
     ///                 out.send(path.unwrap().path());
@@ -385,7 +385,7 @@ where
         func: Func,
     ) -> Pipeline<EntryOut>
     where
-        Func: Fn(LockedReceiver<Output>, Sender<EntryOut>) -> ()
+        Func: Fn(Sender<EntryOut>, LockedReceiver<Output>) -> ()
             + Send
             + Sync
             + 'static,
@@ -408,7 +408,7 @@ where
             let func = func.clone();
 
             thread::spawn(move || {
-                func(entry_rx, entry_tx);
+                func(entry_tx, entry_rx);
             });
         }
 
@@ -452,7 +452,7 @@ where
         Func: Fn(Output) -> EntryOut + Send + 'static,
         EntryOut: Send,
     {
-        self.pipe(move |rx, tx| {
+        self.pipe(move |tx, rx| {
             for entry in rx {
                 tx.send(func(entry));
             }
@@ -482,7 +482,7 @@ where
         Func: Fn(Output) -> EntryOut + Send + Sync + 'static,
         EntryOut: Send,
     {
-        self.ppipe(workers, move |rx, tx| {
+        self.ppipe(workers, move |tx, rx| {
             for item in rx {
                 tx.send(func(item))
             }
@@ -507,7 +507,7 @@ where
     where
         Func: Fn(&Output) -> bool + Send + 'static,
     {
-        self.pipe(move |rx, tx| {
+        self.pipe(move |tx, rx| {
             for entry in rx {
                 if pred(&entry) {
                     tx.send(entry);
@@ -564,7 +564,7 @@ where
         Func: Fn(OutKey, Vec<OutValue>) -> EntryOut + Send + 'static,
         EntryOut: Send,
     {
-        self.pipe(move |rx, tx| {
+        self.pipe(move |tx, rx| {
             // gather up all of the values and group them by key
             let mut by_key: HashMap<OutKey, Vec<OutValue>> = HashMap::new();
             for (key, value) in rx {
@@ -611,7 +611,7 @@ where
         let func = Arc::new(func);
         let pl_config = self.config.clone();
 
-        self.pipe(move |rx, tx| {
+        self.pipe(move |tx, rx| {
             // build up the reducer threads
             let mut txs = Vec::with_capacity(workers);
             for _ in 0..workers {
@@ -672,7 +672,7 @@ where
 
 /// A trait for structs that may be used as `Pipeline` entries
 pub trait PipelineEntry<In, Out> {
-    fn process<I: IntoIterator<Item = In>>(self, rx: I, tx: Sender<Out>) -> ();
+    fn process<I: IntoIterator<Item = In>>(self, tx: Sender<Out>, rx: I) -> ();
 }
 
 mod map {
@@ -712,7 +712,7 @@ mod map {
     where
         Func: Fn(In) -> Out,
     {
-        fn process<I: IntoIterator<Item = In>>(self, rx: I, tx: Sender<Out>) {
+        fn process<I: IntoIterator<Item = In>>(self, tx: Sender<Out>, rx: I) {
             for item in rx {
                 let mapped = (self.func)(item);
                 tx.send(mapped);
@@ -771,7 +771,7 @@ mod filter {
     where
         Func: Fn(&In) -> bool,
     {
-        fn process<I: IntoIterator<Item = In>>(self, rx: I, tx: Sender<In>) {
+        fn process<I: IntoIterator<Item = In>>(self, tx: Sender<In>, rx: I) {
             for item in rx {
                 if (self.func)(&item) {
                     tx.send(item);
@@ -844,8 +844,8 @@ mod multiplex {
     {
         fn process<I: IntoIterator<Item = In>>(
             mut self,
-            rx: I,
             tx: Sender<Out>,
+            rx: I,
         ) {
             if self.entries.len() == 1 {
                 // if there's only one entry we can skip most of the work.
@@ -853,7 +853,7 @@ mod multiplex {
                 // without having to worry about wasting performance in the
                 // simple case
                 let entry = self.entries.pop().expect("len 1 but no entries?");
-                return entry.process(rx, tx);
+                return entry.process(tx, rx);
             }
 
             // TODO both of these methods use PipelineConfig::default() to size their internal
@@ -869,7 +869,7 @@ mod multiplex {
                     let entry_tx = tx.clone();
 
                     thread::spawn(move || {
-                        entry.process(entry_rx, entry_tx);
+                        entry.process(entry_tx, entry_rx);
                     });
                 }
 
@@ -890,7 +890,7 @@ mod multiplex {
                     let entry_tx = tx.clone();
 
                     thread::spawn(move || {
-                        entry.process(entry_rx, entry_tx);
+                        entry.process(entry_tx, entry_rx);
                     });
                 }
 
@@ -1020,11 +1020,11 @@ mod tests {
             .filter(|x| x % 2 == 0)
             .collect();
 
-        let pbb: Pipeline<i32> = Pipeline::from(source).pipe(|in_, out| {
-            for item in in_ {
+        let pbb: Pipeline<i32> = Pipeline::from(source).pipe(|tx, rx| {
+            for item in rx {
                 let item = item + 1;
                 if item % 2 == 0 {
-                    out.send(item);
+                    tx.send(item);
                 }
             }
         });

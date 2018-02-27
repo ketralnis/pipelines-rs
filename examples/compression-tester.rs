@@ -29,7 +29,7 @@ fn main() {
     let args: Vec<OsString> = env::args_os().skip(1).collect();
 
     let pl = Pipeline::from(args)
-        .pipe(|args, out| {
+        .pipe(|out, args| {
             // walk all of the directories we were passed
             for arg in args {
                 debug!("Walking into {:?}", arg);
