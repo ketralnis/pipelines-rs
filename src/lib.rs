@@ -309,6 +309,82 @@ where
         Pipeline { rx, config: config }
     }
 
+    /// Similar to `pipe`, but with multiple workers that will pull from a shared queue
+    ///
+    /// # Example
+    ///
+    /// Take some directories and collect their contents
+    ///
+    /// ```rust
+    /// use pipelines::Pipeline;
+    /// use std::fs;
+    /// use std::path::PathBuf;
+    /// let directories = vec!["/usr/bin", "/usr/local/bin"];
+    ///
+    /// let found_files: Vec<PathBuf> = Pipeline::from(directories)
+    ///     .ppipe(5, |dirs, out| {
+    ///         for dir in dirs {
+    ///             for path in fs::read_dir(dir).unwrap() {
+    ///                 out.send(path.unwrap().path());
+    ///             }
+    ///         }
+    ///     })
+    ///     .into_iter().collect();
+    /// ```
+    pub fn ppipe<EntryOut, Func>(
+        self,
+        workers: usize,
+        func: Func,
+    ) -> Pipeline<EntryOut>
+    where
+        Func: Fn(LockedReceiver<Output>, Sender<EntryOut>) -> ()
+            + Send
+            + Sync
+            + 'static,
+        Output: Send,
+        EntryOut: Send,
+    {
+        // we want a final `master_tx` which everyone will send to, and that we will return
+        let (master_tx, master_rx) = Sender::pair(self.config.clone());
+
+        // and then a shared rx that everyone will draw from
+        let (chan_tx, chan_rx) = Sender::pair(self.config.clone());
+        let chan_rx = LockedReceiver::new(chan_rx);
+
+        // so we can send copies into the various threads
+        let func = Arc::new(func);
+
+        for _ in 0..workers {
+            let entry_rx = chan_rx.clone();
+            let entry_tx = master_tx.clone();
+            let func = func.clone();
+
+            thread::spawn(move || {
+                func(entry_rx, entry_tx);
+            });
+        }
+
+        // otherwise `self` moved into the closure
+        let config = self.config;
+        let rx = self.rx;
+
+        // now since we're going to return immediately, we need to spawn another thread which will
+        // feed our thread-pool
+        thread::spawn(move || {
+            // now we copy the work from rx into the shared channel. the
+            // workers will be putting their results into tx directly so
+            // this is the only shuffling around that we have to do
+            for item in rx {
+                chan_tx.send(item);
+            }
+        });
+
+        Pipeline {
+            rx: master_rx,
+            config: config,
+        }
+    }
+
     /// Call `func` on every entry in the pipeline
     ///
     /// # Example
@@ -358,28 +434,9 @@ where
         Func: Fn(Output) -> EntryOut + Send + Sync + 'static,
         EntryOut: Send,
     {
-        self.pipe(move |rx, tx| {
-            let (master_tx, chan_rx) = Sender::pair(PipelineConfig::default());
-            let chan_rx = LockedRx::new(chan_rx);
-            let func = Arc::new(func);
-
-            for _ in 0..workers {
-                let entry_rx = chan_rx.clone();
-                let entry_tx = tx.clone();
-                let func = func.clone();
-
-                thread::spawn(move || {
-                    for x in entry_rx {
-                        entry_tx.send(func(x));
-                    }
-                });
-            }
-
-            // now we copy the work from rx into the shared channel. the
-            // workers will be putting their results into tx directly so
-            // this is the only shuffling around that we have to do
+        self.ppipe(workers, move |rx, tx| {
             for item in rx {
-                master_tx.send(item);
+                tx.send(func(item))
             }
         })
     }
@@ -688,7 +745,7 @@ mod multiplex {
     #[cfg(feature = "chan")]
     use chan;
 
-    use super::{LockedRx, PipelineConfig, PipelineEntry, Sender};
+    use super::{LockedReceiver, PipelineConfig, PipelineEntry, Sender};
 
     /// A meta pipeline entry that distributes the work of a `PipelineEntry`
     /// across multiple threads
@@ -778,7 +835,7 @@ mod multiplex {
 
                 let (master_tx, chan_rx) =
                     Sender::pair(PipelineConfig::default());
-                let chan_rx = LockedRx::new(chan_rx);
+                let chan_rx = LockedReceiver::new(chan_rx);
 
                 for entry in self.entries {
                     let entry_rx = chan_rx.clone();
@@ -802,14 +859,14 @@ mod multiplex {
 }
 
 #[derive(Debug)]
-pub struct LockedRx<T>
+pub struct LockedReceiver<T>
 where
     T: Send + 'static,
 {
     lockbox: Arc<Mutex<Receiver<T>>>,
 }
 
-impl<T> LockedRx<T>
+impl<T> LockedReceiver<T>
 where
     T: Send,
 {
@@ -820,7 +877,7 @@ where
     }
 }
 
-impl<T> Clone for LockedRx<T>
+impl<T> Clone for LockedReceiver<T>
 where
     T: Send,
 {
@@ -831,7 +888,7 @@ where
     }
 }
 
-impl<T> Iterator for LockedRx<T>
+impl<T> Iterator for LockedReceiver<T>
 where
     T: Send,
 {
