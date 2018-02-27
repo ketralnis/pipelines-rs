@@ -61,87 +61,135 @@ use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::Hash;
 use std::hash::Hasher;
-use std::sync::{Arc, Mutex};
-use std::sync::mpsc;
+use std::sync::Arc;
 use std::thread;
 
 pub use filter::Filter;
 pub use map::Mapper;
 pub use multiplex::Multiplex;
+pub use comms::{LockedReceiver, Receiver, ReceiverIntoIterator, Sender};
 
-/// Passed to pipelines as their place to send results
-#[derive(Debug)]
-pub struct Sender<Out> {
-    tx: mpsc::SyncSender<Out>,
-    config: PipelineConfig,
-}
+mod comms {
+    use std::sync::{Arc, Mutex};
+    use std::sync::mpsc;
 
-impl<Out> Sender<Out> {
-    /// Transmit a value to the next stage in the pipeline
-    ///
-    /// Panics on failure
-    pub fn send(&self, out: Out) -> () {
-        self.tx.send(out).expect("failed send");
+    use super::PipelineConfig;
+
+    /// Passed to pipelines as their place to send results
+    #[derive(Debug)]
+    pub struct Sender<Out> {
+        tx: mpsc::SyncSender<Out>,
+        config: PipelineConfig,
     }
 
-    fn pair(config: PipelineConfig) -> (Self, Receiver<Out>) {
-        let (tx, rx) = mpsc::sync_channel(config.buff_size);
-        (Self { tx, config }, Receiver { rx })
-    }
-}
+    impl<Out> Sender<Out> {
+        /// Transmit a value to the next stage in the pipeline
+        ///
+        /// Panics on failure
+        pub fn send(&self, out: Out) -> () {
+            self.tx.send(out).expect("failed send");
+        }
 
-impl<Out> Clone for Sender<Out> {
-    fn clone(&self) -> Self {
-        Self {
-            tx: self.tx.clone(),
-            config: self.config.clone(),
+        pub(super) fn pair(config: PipelineConfig) -> (Self, Receiver<Out>) {
+            let (tx, rx) = mpsc::sync_channel(config.buff_size);
+            (Self { tx, config }, Receiver { rx })
         }
     }
-}
 
-/// Passed to pipelines as their place to get incoming data from the previous stage.
-///
-/// It's possible to use by calling `recv` directly, but is primarily for its `into_iter`
-#[derive(Debug)]
-pub struct Receiver<In> {
-    rx: mpsc::Receiver<In>,
-}
-
-impl<In> Receiver<In> {
-    /// Get an item from the previous stage
-    ///
-    /// returns None if the remote side has hung up and all data has been received
-    pub fn recv(&mut self) -> Option<In> {
-        match self.rx.recv() {
-            Ok(val) => Some(val),
-            Err(_recv_err) => {
-                // can only fail on hangup
-                None
+    impl<Out> Clone for Sender<Out> {
+        fn clone(&self) -> Self {
+            Self {
+                tx: self.tx.clone(),
+                config: self.config.clone(),
             }
         }
     }
-}
 
-impl<In> IntoIterator for Receiver<In> {
-    type Item = In;
-    type IntoIter = ReceiverIntoIterator<In>;
+    /// Passed to pipelines as their place to get incoming data from the previous stage.
+    ///
+    /// It's possible to use by calling `recv` directly, but is primarily for its `into_iter`
+    #[derive(Debug)]
+    pub struct Receiver<In> {
+        rx: mpsc::Receiver<In>,
+    }
 
-    fn into_iter(self) -> Self::IntoIter {
-        ReceiverIntoIterator {
-            iter: self.rx.into_iter(),
+    impl<In> Receiver<In> {
+        /// Get an item from the previous stage
+        ///
+        /// returns None if the remote side has hung up and all data has been received
+        pub fn recv(&mut self) -> Option<In> {
+            match self.rx.recv() {
+                Ok(val) => Some(val),
+                Err(_recv_err) => {
+                    // can only fail on hangup
+                    None
+                }
+            }
         }
     }
-}
 
-pub struct ReceiverIntoIterator<In> {
-    iter: mpsc::IntoIter<In>,
-}
+    impl<In> IntoIterator for Receiver<In> {
+        type Item = In;
+        type IntoIter = ReceiverIntoIterator<In>;
 
-impl<In> Iterator for ReceiverIntoIterator<In> {
-    type Item = In;
+        fn into_iter(self) -> Self::IntoIter {
+            ReceiverIntoIterator {
+                iter: self.rx.into_iter(),
+            }
+        }
+    }
 
-    fn next(&mut self) -> Option<In> {
-        self.iter.next()
+    pub struct ReceiverIntoIterator<In> {
+        iter: mpsc::IntoIter<In>,
+    }
+
+    impl<In> Iterator for ReceiverIntoIterator<In> {
+        type Item = In;
+
+        fn next(&mut self) -> Option<In> {
+            self.iter.next()
+        }
+    }
+
+    #[derive(Debug)]
+    pub struct LockedReceiver<T>
+    where
+        T: Send + 'static,
+    {
+        lockbox: Arc<Mutex<Receiver<T>>>,
+    }
+
+    impl<T> LockedReceiver<T>
+    where
+        T: Send,
+    {
+        pub fn new(recv: Receiver<T>) -> Self {
+            Self {
+                lockbox: Arc::new(Mutex::new(recv)),
+            }
+        }
+    }
+
+    impl<T> Clone for LockedReceiver<T>
+    where
+        T: Send,
+    {
+        fn clone(&self) -> Self {
+            Self {
+                lockbox: self.lockbox.clone(),
+            }
+        }
+    }
+
+    impl<T> Iterator for LockedReceiver<T>
+    where
+        T: Send,
+    {
+        type Item = T;
+
+        fn next(&mut self) -> Option<T> {
+            self.lockbox.lock().expect("failed unwrap mutex").recv()
+        }
     }
 }
 
@@ -858,47 +906,6 @@ mod multiplex {
 
 }
 
-#[derive(Debug)]
-pub struct LockedReceiver<T>
-where
-    T: Send + 'static,
-{
-    lockbox: Arc<Mutex<Receiver<T>>>,
-}
-
-impl<T> LockedReceiver<T>
-where
-    T: Send,
-{
-    pub fn new(recv: Receiver<T>) -> Self {
-        Self {
-            lockbox: Arc::new(Mutex::new(recv)),
-        }
-    }
-}
-
-impl<T> Clone for LockedReceiver<T>
-where
-    T: Send,
-{
-    fn clone(&self) -> Self {
-        Self {
-            lockbox: self.lockbox.clone(),
-        }
-    }
-}
-
-impl<T> Iterator for LockedReceiver<T>
-where
-    T: Send,
-{
-    type Item = T;
-
-    fn next(&mut self) -> Option<T> {
-        self.lockbox.lock().expect("failed unwrap mutex").recv()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -914,7 +921,7 @@ mod tests {
 
     #[test]
     fn map() {
-        let source: Vec<i32> = (1..1000).collect();
+        let source: Vec<i32> = (1..100).collect();
         let expect: Vec<i32> = source.iter().map(|x| x * 2).collect();
 
         let pbb: Pipeline<i32> = Pipeline::from(source).map(|i| i * 2);
@@ -990,7 +997,7 @@ mod tests {
 
     #[test]
     fn filter() {
-        let source: Vec<i32> = (1..1000).collect();
+        let source: Vec<i32> = (1..100).collect();
         let expect: Vec<i32> = source
             .iter()
             .map(|x| x + 1)
@@ -1006,7 +1013,7 @@ mod tests {
 
     #[test]
     fn simple_closure() {
-        let source: Vec<i32> = (1..1000).collect();
+        let source: Vec<i32> = (1..100).collect();
         let expect: Vec<i32> = source
             .iter()
             .map(|x| x + 1)
