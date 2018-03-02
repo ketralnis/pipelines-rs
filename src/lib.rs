@@ -70,16 +70,20 @@ pub use multiplex::Multiplex;
 pub use comms::{LockedReceiver, Receiver, ReceiverIntoIterator, Sender};
 
 mod comms {
-    use std::sync::{Arc, Mutex};
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
     use std::sync::mpsc;
+    use std::sync::{Arc, Mutex};
 
     use super::PipelineConfig;
 
     /// Passed to pipelines as their place to send results
     #[derive(Debug)]
     pub struct Sender<Out> {
-        tx: mpsc::SyncSender<Out>,
+        tx: mpsc::SyncSender<VecDeque<Out>>,
         config: PipelineConfig,
+        // wrapped in a refcell so we can send using immutable references, like SyncSender does
+        buffer: RefCell<VecDeque<Out>>,
     }
 
     impl<Out> Sender<Out> {
@@ -87,12 +91,48 @@ mod comms {
         ///
         /// Panics on failure
         pub fn send(&self, out: Out) -> () {
-            self.tx.send(out).expect("failed send");
+            let new_len = {
+                let mut buff = self.buffer.borrow_mut();
+                buff.push_back(out);
+                buff.len()
+            };
+            if new_len >= self.config.batch_size {
+                self.flush()
+            }
+        }
+
+        /// Send any unsent data sitting in the buffer
+        ///
+        /// Panics on failure to send
+        pub fn flush(&self) {
+            let old_buffer = self.buffer
+                .replace(VecDeque::with_capacity(self.config.batch_size));
+            if old_buffer.len() > 0 {
+                self.tx.send(old_buffer).expect("failed send");
+            }
         }
 
         pub(super) fn pair(config: PipelineConfig) -> (Self, Receiver<Out>) {
             let (tx, rx) = mpsc::sync_channel(config.buff_size);
-            (Self { tx, config }, Receiver { rx })
+            let tx_buffer = VecDeque::with_capacity(config.batch_size);
+            let rx_buffer = VecDeque::with_capacity(config.batch_size);
+            (
+                Self {
+                    tx,
+                    config,
+                    buffer: RefCell::new(tx_buffer),
+                },
+                Receiver {
+                    rx,
+                    buffer: RefCell::new(rx_buffer),
+                },
+            )
+        }
+    }
+
+    impl<Out> Drop for Sender<Out> {
+        fn drop(&mut self) {
+            self.flush()
         }
     }
 
@@ -101,6 +141,9 @@ mod comms {
             Self {
                 tx: self.tx.clone(),
                 config: self.config.clone(),
+                buffer: RefCell::new(VecDeque::with_capacity(
+                    self.config.buff_size,
+                )),
             }
         }
     }
@@ -110,7 +153,8 @@ mod comms {
     /// It's possible to use by calling `recv` directly, but is primarily for its `into_iter`
     #[derive(Debug)]
     pub struct Receiver<In> {
-        rx: mpsc::Receiver<In>,
+        rx: mpsc::Receiver<VecDeque<In>>,
+        buffer: RefCell<VecDeque<In>>,
     }
 
     impl<In> Receiver<In> {
@@ -118,12 +162,56 @@ mod comms {
         ///
         /// returns None if the remote side has hung up and all data has been received
         pub fn recv(&mut self) -> Option<In> {
+            let current_len = {
+                let buff = self.buffer.borrow();
+                buff.len()
+            };
+            if current_len > 0 {
+                // there's already data in the buffer so we don't have to do anything
+                return self.buffer.get_mut().pop_front();
+            }
+
+            // no data in the buffer, get some from the pipe
             match self.rx.recv() {
-                Ok(val) => Some(val),
-                Err(_recv_err) => {
-                    // can only fail on hangup
-                    None
+                Ok(val) => {
+                    self.buffer.replace(val);
                 }
+                Err(_recv_err) => return None,
+            }
+
+            let current_len = {
+                let buff = self.buffer.borrow();
+                buff.len()
+            };
+            // now we should have data in the buffer and can use it
+            if current_len == 0 {
+                // I guess we got an empty VecDeque? this shouldn't happen
+                return None;
+            } else {
+                return self.buffer.get_mut().pop_front();
+            }
+        }
+
+        fn recv_buff(&mut self) -> Option<VecDeque<In>> {
+            // receive a whole buffer of the batch size
+
+            let current_len = {
+                let buff = self.buffer.borrow();
+                buff.len()
+            };
+            if current_len > 0 {
+                // if we have a nonzero buffer already, return it and make a new one for ourselves
+                return Some(self.buffer.replace(VecDeque::new()));
+            }
+
+            // otherwise, pull a buffer from the pipe
+            match self.rx.recv() {
+                Ok(val) => {
+                    // return the one we just received. this leaves our own 0-sized buffer in place
+                    // but that's okay
+                    return Some(val);
+                }
+                Err(_recv_err) => return None,
             }
         }
     }
@@ -135,19 +223,32 @@ mod comms {
         fn into_iter(self) -> Self::IntoIter {
             ReceiverIntoIterator {
                 iter: self.rx.into_iter(),
+                buffer: self.buffer.into_inner(),
             }
         }
     }
 
     pub struct ReceiverIntoIterator<In> {
-        iter: mpsc::IntoIter<In>,
+        iter: mpsc::IntoIter<VecDeque<In>>,
+        buffer: VecDeque<In>,
     }
 
     impl<In> Iterator for ReceiverIntoIterator<In> {
         type Item = In;
 
         fn next(&mut self) -> Option<In> {
-            self.iter.next()
+            if self.buffer.len() == 0 {
+                // buffer is empty. fill it
+                match self.iter.next() {
+                    Some(buff) => {
+                        self.buffer = buff;
+                    }
+                    None => {
+                        return None;
+                    }
+                }
+            }
+            return self.buffer.pop_front();
         }
     }
 
@@ -157,6 +258,7 @@ mod comms {
         T: Send + 'static,
     {
         lockbox: Arc<Mutex<Receiver<T>>>,
+        buffer: VecDeque<T>,
     }
 
     impl<T> LockedReceiver<T>
@@ -166,6 +268,7 @@ mod comms {
         pub fn new(recv: Receiver<T>) -> Self {
             Self {
                 lockbox: Arc::new(Mutex::new(recv)),
+                buffer: VecDeque::new(),
             }
         }
     }
@@ -177,6 +280,7 @@ mod comms {
         fn clone(&self) -> Self {
             Self {
                 lockbox: self.lockbox.clone(),
+                buffer: VecDeque::new(),
             }
         }
     }
@@ -188,7 +292,19 @@ mod comms {
         type Item = T;
 
         fn next(&mut self) -> Option<T> {
-            self.lockbox.lock().expect("failed unwrap mutex").recv()
+            if self.buffer.len() == 0 {
+                match self.lockbox
+                    .lock()
+                    .expect("failed unwrap mutex")
+                    .recv_buff()
+                {
+                    Some(buff) => self.buffer = buff,
+                    None => {
+                        return None;
+                    }
+                }
+            }
+            return self.buffer.pop_front();
         }
     }
 }
@@ -212,6 +328,7 @@ mod comms {
 #[derive(Debug, Copy, Clone)]
 pub struct PipelineConfig {
     buff_size: usize,
+    batch_size: usize,
 }
 
 impl PipelineConfig {
@@ -222,11 +339,21 @@ impl PipelineConfig {
     pub fn buff_size(self, buff_size: usize) -> Self {
         Self { buff_size, ..self }
     }
+
+    /// Set the size of each batch of messages sent
+    ///
+    /// This tunes how much overhead is spent on synchronisation
+    pub fn batch_size(self, batch_size: usize) -> Self {
+        Self { batch_size, ..self }
+    }
 }
 
 impl Default for PipelineConfig {
     fn default() -> Self {
-        Self { buff_size: 10 }
+        Self {
+            buff_size: 10,
+            batch_size: 10,
+        }
     }
 }
 
@@ -402,6 +529,7 @@ where
         // so we can send copies into the various threads
         let func = Arc::new(func);
 
+        // bring up the actual workers
         for _ in 0..workers {
             let entry_rx = chan_rx.clone();
             let entry_tx = master_tx.clone();
@@ -1034,16 +1162,49 @@ mod tests {
     }
 
     #[test]
-    fn mapreduce() {
+    fn pmap() {
+        let source: Vec<i32> = (1..100).collect();
+        let expect: Vec<i32> = source.iter().map(|x| x * 2).collect();
+        let workers: usize = 2;
+
+        let pbb: Pipeline<i32> =
+            Pipeline::from(source).pmap(workers, |i| i * 2);
+        let mut produced: Vec<i32> = pbb.into_iter().collect();
+        produced.sort();
+
+        assert_eq!(produced, expect);
+    }
+
+    #[test]
+    fn preduce() {
         let source: Vec<i32> = (1..1000).collect();
         let workers: usize = 2;
 
         let expect = vec![(false, 1996), (true, 1998)];
 
         let mut produced: Vec<(bool, i32)> = Pipeline::from(source)
+            .map(|x| (x % 3 == 0, x * 2))
+            .preduce(workers, |threevenness, nums| {
+                (threevenness, *nums.iter().max().unwrap())
+            })
+            .into_iter()
+            .collect();
+        produced.sort();
+
+        assert_eq!(produced, expect);
+    }
+
+    #[test]
+    fn mapreduce() {
+        let source: Vec<i32> = (1..1000).collect();
+        let workers: usize = 1;
+
+        let expect = vec![(false, 1996), (true, 1998)];
+
+        let mut produced: Vec<(bool, i32)> = Pipeline::from(source)
             .pmap(workers, |x| x * 2)
             .pmap(workers, |x| (x % 3 == 0, x))
-            .preduce(2, |threevenness, nums| {
+            .preduce(workers, |threevenness, nums| {
                 (threevenness, *nums.iter().max().unwrap())
             })
             .into_iter()
