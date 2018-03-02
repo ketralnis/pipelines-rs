@@ -756,7 +756,7 @@ where
                         hm.entry(k).or_insert_with(Vec::new).push(v);
                     }
 
-                    for (k, vs) in hm.drain() {
+                    for (k, vs) in hm.into_iter() {
                         tx.send(func(k, vs));
                     }
                 });
