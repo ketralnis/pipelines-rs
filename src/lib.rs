@@ -610,6 +610,9 @@ where
         Func: Fn(Output) -> EntryOut + Send + Sync + 'static,
         EntryOut: Send,
     {
+        if workers == 1 {
+            return self.map(func);
+        }
         self.ppipe(workers, move |tx, rx| {
             for item in rx {
                 tx.send(func(item))
@@ -672,7 +675,7 @@ where
     /// The reduce phase of a mapreduce-type pipeline.
     ///
     /// The previous entry must have sent tuples of (Key, Value), and this entry
-    /// groups them by Key and calls func once per Key
+    /// groups them by Key and calls `func` once per Key
     ///
     /// # Example
     ///
@@ -707,10 +710,61 @@ where
         })
     }
 
+    /// Bring up `workers` threads and send values with the same keys to the same thread
+    ///
+    /// They arrive unordered. This is part of the work of `preduce`
+    pub fn distribute<EntryOut, Func>(
+        self,
+        workers: usize,
+        func: Func,
+    ) -> Pipeline<EntryOut>
+    where
+        Func: Fn(Sender<EntryOut>, Receiver<(OutKey, OutValue)>)
+            + Send
+            + Sync
+            + 'static,
+        EntryOut: Send,
+    {
+        let func = Arc::new(func);
+        let pl_config = self.config.clone();
+
+        self.pipe(move |tx, rx| {
+            // build up the reducer threads
+            let mut txs = Vec::with_capacity(workers);
+            for _ in 0..workers {
+                let func = func.clone();
+                // each thread receives data on an rx that we make for it
+                let (entry_tx, entry_rx) = Sender::pair(pl_config);
+                // but they send their data directly into the next stage
+                let tx = tx.clone();
+
+                thread::spawn(move || func(tx, entry_rx));
+
+                txs.push(entry_tx);
+            }
+
+            // now iterate through the messages sent into the master reducer thread (us)
+            for (key, value) in rx {
+                let mut hasher = DefaultHasher::new();
+                key.hash(&mut hasher);
+                let which = (hasher.finish() as usize) % workers;
+
+                // because we send synchronously like this, we may block if this thread's buffer
+                // doesn't have room for this message which may happen if a reducer can't keep up,
+                // even if another reducer may have buffer space. (We can't send it to any other
+                // thread because a reducer thread must see all instances of a given key). In the
+                // case of `preduce`, during this phase the reducers haven't actually started doing
+                // any work yet so so any blocking they do will probably be just due to
+                // hashmap/vector reallocation.  For other use-cases they may want to use larger
+                // buffer sizes or other workarounds for uneven work distribution
+                txs[which].send((key, value));
+            }
+        })
+    }
+
     /// Like `reduce` but called with multiple reducer threads
     ///
-    /// All instances of the same Key are sent to the same thread (to guarantee mapreduce
-    /// semantics)
+    /// Each instance of `func` is called with a Key and every Value that had that Key
     ///
     /// # Example
     ///
@@ -736,52 +790,18 @@ where
         OutValue: Send,
         EntryOut: Send,
     {
-        let func = Arc::new(func);
-        let pl_config = self.config.clone();
-
-        self.pipe(move |tx, rx| {
-            // build up the reducer threads
-            let mut txs = Vec::with_capacity(workers);
-            for _ in 0..workers {
-                let func = func.clone();
-                // let pl_config = self.config.clone();
-                // each thread receives data on an rx that we make for it
-                let (entry_tx, entry_rx) = Sender::pair(pl_config);
-                // but they send their data directly into the next stage
-                let tx = tx.clone();
-
-                thread::spawn(move || {
-                    let mut hm = HashMap::new();
-                    for (k, v) in entry_rx {
-                        hm.entry(k).or_insert_with(Vec::new).push(v);
-                    }
-
-                    for (k, vs) in hm.into_iter() {
-                        tx.send(func(k, vs));
-                    }
-                });
-
-                txs.push(entry_tx);
+        if workers == 1 {
+            return self.reduce(func);
+        }
+        self.distribute(workers, move |tx, rx| {
+            let mut hm = HashMap::new();
+            for (k, v) in rx {
+                hm.entry(k).or_insert_with(Vec::new).push(v);
             }
 
-            // now iterate through the messages sent into the master reducer thread (us)
-            for (key, value) in rx {
-                let mut hasher = DefaultHasher::new();
-                key.hash(&mut hasher);
-                let which = (hasher.finish() as usize) % workers;
-
-                // because we send synchronously like this, we may block if this thread's buffer
-                // doesn't have room for this message which may happen if a reducer can't keep up,
-                // even if another reducer may have buffer space. (We can't send it to any other
-                // thread because a reducer thread must see all instances of a given key).  But
-                // during this phase the reducers haven't actually started doing any work yet, so
-                // any blocking they do will probably be just due to hashmap/vector reallocation.
-                txs[which].send((key, value));
+            for (k, vs) in hm.into_iter() {
+                tx.send(func(k, vs));
             }
-
-            // now every thread has received every message and should be starting doing their
-            // actual reducer phase. They send their data directly into the final tx so our work
-            // here is done
         })
     }
 }
