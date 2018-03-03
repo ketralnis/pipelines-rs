@@ -15,20 +15,29 @@ use std::ffi::OsString;
 use std::fs::File;
 use std::io::Cursor;
 use std::io::Read;
+use std::process::exit;
 
 use flate2::Compression;
 use flate2::read::ZlibEncoder;
 use humansize::{file_size_opts, FileSize};
 
-use pipelines::{Mapper, Multiplex, Pipeline};
+use pipelines::{Pipeline, PipelineConfig};
 
 fn main() {
     // how many threads to use for compression
     let workers = num_cpus::get();
 
+    env_logger::init().expect("failed to init logger");
+
     let args: Vec<OsString> = env::args_os().skip(1).collect();
 
+    if args.len() == 0 {
+        error!("Usage: compression-tester [dir ...]");
+        exit(1);
+    }
+
     let pl = Pipeline::from(args)
+        .configure(PipelineConfig::default().batch_size(1))
         .pipe(|out, args| {
             // walk all of the directories we were passed
             for arg in args {
@@ -57,10 +66,7 @@ fn main() {
             data
         })
         // but we can do the compression in parallel
-        .then(Multiplex::from(Mapper::new(try_compress),
-                              workers,
-                              ),
-              );
+        .pmap(workers, try_compress);
 
     let mut total_old_size: usize = 0;
     let mut total_new_size: usize = 0;
